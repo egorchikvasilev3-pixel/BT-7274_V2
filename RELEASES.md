@@ -54,18 +54,18 @@ $git = "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe
 
 Релиз `v2.0.1` опубликован: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.1
 
-Для следующей версии:
+Для следующей версии (пример — `v2.0.2`):
 
 1. Создайте тег версии:
 
 ```powershell
 $git = "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe"
-& $git tag -a v2.0.1 -m "BT-7274 V2.0.1"
-& $git push origin v2.0.1
+& $git tag -a v2.0.2 -m "BT-7274 V2.0.2"
+& $git push origin v2.0.2
 ```
 
 2. На GitHub откройте **Releases → Draft a new release**.
-3. Выберите тег `v2.0.1`, название `BT-7274 V2.0.1`.
+3. Выберите тег `v2.0.2`, название `BT-7274 V2.0.2`.
 4. Прикрепите zip из папки `release\` (внутри exe, `helmet.webp`, `README.md`, `LICENSE`).
 5. Вставьте описание из `release\RELEASE_NOTES.md`, прикрепите `release\SHA256.txt`.
 6. Опубликуйте релиз.
