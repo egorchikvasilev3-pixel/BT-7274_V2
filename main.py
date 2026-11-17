@@ -66,9 +66,20 @@ OLLAMA_MODEL = "llama3.2:3b"
 OLLAMA_KEEP_ALIVE = os.environ.get("BT7274_OLLAMA_KEEP_ALIVE", "5m")
 
 WHISPER_GPU_MODEL = "small"
-WHISPER_CPU_MODEL = "base"
+WHISPER_CPU_MODEL = "small"
+WHISPER_CPU_FALLBACK_MODEL = "base"
 WHISPER_GPU_COMPUTE_TYPE = "float16"
 WHISPER_CPU_COMPUTE_TYPE = "int8"
+WHISPER_INITIAL_PROMPT = (
+    "БТ-7274. Команды пилота: следующий трек, предыдущий трек, пауза, "
+    "продолжить, открой YouTube, включи музыку, сделай запись, останови запись, "
+    "который час, поставь таймер."
+)
+WHISPER_HOTWORDS = (
+    "БТ-7274, следующий трек, предыдущий трек, пауза, продолжить, "
+    "открой YouTube, включи музыку, сделай запись, останови запись, "
+    "поставь таймер, который час, громче, тише, скриншот"
+)
 
 TTS_VOICE = "ru-RU-DmitryNeural"
 TTS_RATE = "-6%"
@@ -157,7 +168,8 @@ TAG_ALT = "|".join(re.escape(tag) for tag in sorted(KNOWN_TAGS))
 KNOWN_TAG_RE = re.compile(r"\[(" + TAG_ALT + r")\]", re.IGNORECASE)
 LEADING_TAG_RE = re.compile(r"^\s*\[([A-Za-z][A-Za-z0-9_]*)\]\s*")
 WAKE_PREFIX_RE = re.compile(
-    r"^[\s\-–—]*(?:(?:б\s*т|бэ\s*тэ|би[\s-]*ти|bt)(?:\s*[-–—]?\s*7274)?)"
+    r"^[\s\-–—]*(?:(?:б\s*т|бэ\s*тэ|би[\s-]*ти|bt)"
+    r"(?:\s*[-–—]?\s*(?:7274|72[\s-]*74))?|(?:7274|72[\s-]*74))"
     r"(?=$|[\s,.:;!?…—–-])[\s,.:;!?…—–-]*",
     re.IGNORECASE,
 )
@@ -190,6 +202,60 @@ TRANSLITERATION_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bprovodnik\b", re.IGNORECASE), "Проводник"),
     (re.compile(r"\bgromkost\b", re.IGNORECASE), "Громкость"),
 )
+ASR_CORRECTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\bтрак(?:а|у|ом|е|и|ов|ам|ами|ах)?\b",
+            re.IGNORECASE,
+        ),
+        "трек",
+    ),
+    (
+        re.compile(
+            r"\bтрэк(?:а|у|ом|е|и|ов|ам|ами|ах)?\b",
+            re.IGNORECASE,
+        ),
+        "трек",
+    ),
+    (
+        re.compile(
+            r"\bтрект(?:а|у|ом|е|и|ов|ам|ами|ах)?\b",
+            re.IGNORECASE,
+        ),
+        "трек",
+    ),
+    (
+        re.compile(r"\bпаус[а-яё]*\b", re.IGNORECASE),
+        "пауза",
+    ),
+    (
+        re.compile(
+            r"\bпродолж(?:аю|аем|ай|им|ите|ен|ать|ал|ала|али|и)\b",
+            re.IGNORECASE,
+        ),
+        "продолжи",
+    ),
+    (
+        re.compile(r"\bследущ[а-яё]*\b", re.IGNORECASE),
+        "следующий",
+    ),
+)
+ACTION_COMMAND_CONTEXT_RE = re.compile(
+    r"\b(?:трек|песн|композиц|пауз|продолж|запис|видео|съемк|съёмк|окн|"
+    r"громк|звук|музык|youtube|ютуб|таймер|скриншот|снимок|корзин|проводник|"
+    r"блокнот|калькулятор|steam|discord|браузер|хром|заблокир|сверни|закрой)\w*",
+    re.IGNORECASE,
+)
+
+
+def normalize_asr_text(text: str) -> str:
+    """Исправляет типичные ошибки Whisper перед разбором команды."""
+    value = text or ""
+    for pattern, replacement in ASR_CORRECTIONS:
+        value = pattern.sub(replacement, value)
+    return value
+
+
 ACTION_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
@@ -872,7 +938,7 @@ def strip_wake_name(text: str) -> str:
 
 
 def infer_action_from_command(command: str) -> str | None:
-    value = (command or "").strip()
+    value = normalize_asr_text((command or "").strip())
     if not value or NEGATION_RE.search(value):
         return None
     for pattern, action_tag in ACTION_HINTS:
@@ -1643,6 +1709,10 @@ class WhisperEngine:
             else:
                 LOG.info("Whisper: CUDA-библиотеки не найдены, используется CPU")
             candidates.append((WHISPER_CPU_MODEL, "cpu", WHISPER_CPU_COMPUTE_TYPE))
+            if WHISPER_CPU_FALLBACK_MODEL != WHISPER_CPU_MODEL:
+                candidates.append(
+                    (WHISPER_CPU_FALLBACK_MODEL, "cpu", WHISPER_CPU_COMPUTE_TYPE)
+                )
             last_error: Exception | None = None
             for model_name, device, compute_type in candidates:
                 LOG.info(
@@ -1668,10 +1738,15 @@ class WhisperEngine:
                             error,
                         )
                         continue
-                    LOG.exception("Не удалось инициализировать Whisper")
-                    break
+                    LOG.exception(
+                        "Не удалось инициализировать Whisper %s, пробую резервный вариант",
+                        model_name,
+                    )
+                    continue
                 if device == "cuda":
                     LOG.info("Whisper работает на GPU: %s/%s", model_name, compute_type)
+                else:
+                    LOG.info("Whisper работает на CPU: %s/%s", model_name, compute_type)
                 return self._model
             raise SpeechRecognitionError(
                 "Не удалось загрузить модель Whisper. Проверьте локальный кэш модели."
@@ -1736,7 +1811,8 @@ class WhisperEngine:
             "vad_filter": vad_filter,
             "condition_on_previous_text": False,
             "without_timestamps": True,
-            "initial_prompt": "БТ-7274.",
+            "initial_prompt": WHISPER_INITIAL_PROMPT,
+            "hotwords": WHISPER_HOTWORDS,
         }
         if vad_filter:
             kwargs["vad_parameters"] = {"min_silence_duration_ms": 250}
@@ -3764,6 +3840,11 @@ class BT7274Controller(QObject):
                     "Для действия нужна явная команда пилота.",
                     model_actions,
                 )
+                if ACTION_COMMAND_CONTEXT_RE.search(normalize_asr_text(command)):
+                    response = (
+                        "Приказ не распознан как действие, пилот. "
+                        "Повторите команду."
+                    )
             if not response:
                 raise BrainError("Дата-ядро не сформировало ответ.")
             self._signals.subtitle.emit(response)
