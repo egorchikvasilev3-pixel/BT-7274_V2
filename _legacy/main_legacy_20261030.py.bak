@@ -1,0 +1,175 @@
+# main.py — Голографический прозрачный оверлей БТ-7274 на PySide6
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+import threading
+import time
+import random
+import keyboard
+
+from PySide6.QtCore import Qt, QTimer, Slot, Signal
+from PySide6.QtGui import QPixmap, QFont
+from PySide6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
+
+from logic import BTBrain, ПАПКА_ПРОЕКТА
+
+# Картинка шлема строго в корне папки проекта рядом со скриптами!
+ПУТЬ_К_ШЛЕМУ = os.path.join(ПАПКА_ПРОЕКТА, "helmet.webp")
+
+class BTOverlay(QWidget):
+    сигнал_показать = Signal(str)
+    сигнал_скрыть = Signal()
+    сигнал_ответ_бт = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        
+        # Настройки футуристичного прозрачного визора (оверлея)
+        self.setWindowFlags(
+            Qt.WindowStaysOnTopHint |     # Поверх всех приложений и игр
+            Qt.FramelessWindowHint |      # Полностью убирает рамки Windows
+            Qt.Tool |                     # Убирает ИИ из панели задач Alt+Tab
+            Qt.WindowTransparentForInput  # Пропускает клики мыши сквозь шлем в игру
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True) 
+        self.resize(320, 380) 
+        
+        # Идеальное позиционирование: правый верхний угол монитора
+        screen = QApplication.primaryScreen().geometry()
+        x = screen.width() - self.width() - 15   
+        y = 60                                   
+        self.move(x, y)
+
+        self._init_ui()
+
+        self.сигнал_показать.connect(self._slot_show_overlay)
+        self.сигнал_скрыть.connect(self._slot_hide_overlay)
+        self.сигнал_ответ_бт.connect(self._slot_update_subtitle)
+
+        # Стартуем мозг титана
+        self.brain = BTBrain(
+            на_лог=self._print_log,
+            на_ответ_бт=self._trigger_subtitle,
+            сигнал_завершения=self._trigger_hide
+        )
+        self.f1_pressed = False
+        self.is_glitching = False
+        
+        # Таймер для неонового глитч-эффекта мерцания шлема
+        self.glitch_timer = QTimer(self)
+        self.glitch_timer.timeout.connect(self._animate_glitch)
+        
+        threading.Thread(target=self._listen_f1_hook, daemon=True).start()
+        self.hide()
+
+    def _init_ui(self):
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignTop | Qt.AlignRight)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+
+        # 1. Шлем БТ-7274
+        self.helmet_label = QLabel()
+        if os.path.exists(ПУТЬ_К_ШЛЕМУ):
+            self.base_pixmap = QPixmap(ПУТЬ_К_ШЛЕМУ).scaled(240, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.helmet_label.setPixmap(self.base_pixmap)
+        else:
+            self.helmet_label.setText("[ helmet.webp не найден ]")
+            self.helmet_label.setStyleSheet("color: #ff5555; font-family: Consolas;")
+        self.helmet_label.setAlignment(Qt.AlignRight)
+        layout.addWidget(self.helmet_label)
+
+        # 2. Субтитры тактического визора кабины титана
+        self.subtitle_label = QLabel("БТ-7274: Ожидаю...")
+        self.subtitle_label.setFont(QFont("Consolas", 12, QFont.Bold))
+        self.subtitle_label.setStyleSheet("color: #4db8ff; background: transparent;")
+        self.subtitle_label.setWordWrap(True)
+        self.subtitle_label.setFixedWidth(240) 
+        self.subtitle_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        layout.addWidget(self.subtitle_label)
+
+        self.setLayout(layout)
+
+    def _print_log(self, text):
+        print(f"[SYS] {text}")
+
+    def _animate_glitch(self):
+        """Создает эффект цифровых помех оверлея при обработке сигнала"""
+        if not self.is_glitching or not os.path.exists(ПУТЬ_К_ШЛЕМУ):
+            return
+        opacity = random.uniform(0.75, 1.0)
+        self.setWindowOpacity(opacity)
+        
+        if random.random() > 0.85:
+            offset = random.randint(-4, 4)
+            scaled = QPixmap(ПУТЬ_К_ШЛЕМУ).scaled(240 + offset, 240 + offset, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.helmet_label.setPixmap(scaled)
+        else:
+            self.helmet_label.setPixmap(self.base_pixmap)
+
+    def _listen_f1_hook(self):
+        while True:
+            # Зажали рацию F1
+            if keyboard.is_pressed("f1") and not self.f1_pressed:
+                self.f1_pressed = True
+                self.is_glitching = True
+                self.glitch_timer.start(50) 
+                self.сигнал_показать.emit("🎙️ СВЯЗЬ ОТКРЫТА...")
+                
+                audio_stream = self.brain.запись_аудио_рации()
+                text_command = self.brain.распознать_речь_локально(audio_stream)
+                
+                if text_command:
+                    cleaned = text_command.strip()
+                    if cleaned.lower().startswith("бт"):
+                        cleaned = cleaned[2:].strip(",. ").strip()
+                    
+                    if cleaned:
+                        self.сигнал_показать.emit(f"ПИЛОТ: {cleaned}")
+                        self.brain.спросить_олламу(cleaned)
+                    else:
+                        self.сигнал_показать.emit("❌ Пустой аудиосигнал.")
+                        self._trigger_hide()
+                else:
+                    self.сигнал_показать.emit("❌ Сигнал потерян.")
+                    self._trigger_hide()
+
+            if not keyboard.is_pressed("f1") and self.f1_pressed:
+                self.f1_pressed = False
+                
+            time.sleep(0.04)
+
+    def _trigger_subtitle(self, text):
+        self.сигнал_ответ_бт.emit(text)
+
+    def _trigger_hide(self):
+        # Оверлей автоматически гаснет через 3.5 секунды после окончания реплики БТ
+        QTimer.singleShot(3500, self._stop_and_hide)
+
+    def _stop_and_hide(self):
+        self.is_glitching = False
+        self.glitch_timer.stop()
+        self.setWindowOpacity(1.0)
+        if os.path.exists(ПУТЬ_К_ШЛЕМУ):
+            self.helmet_label.setPixmap(self.base_pixmap)
+        self.hide()
+
+    @Slot(str)
+    def _slot_show_overlay(self, status_text):
+        self.subtitle_label.setText(status_text)
+        self.show()
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+
+    @Slot()
+    def _slot_hide_overlay(self):
+        self._stop_and_hide()
+
+    @Slot(str)
+    def _slot_update_subtitle(self, text):
+        self.subtitle_label.setText(f"{text}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    overlay = BTOverlay()
+    sys.exit(app.exec())

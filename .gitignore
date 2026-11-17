@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+venv/
+
+# Служебные файлы запуска
+.bt7274.lock
+data/shutdown.request
+data/notes.txt
+
+# Сгенерированные данные
+logs/*.log*
+bt_voice_cache/*
+shots/*
+clips/*
+chat_history.txt
+!logs/.gitkeep
+!bt_voice_cache/.gitkeep
+!shots/.gitkeep
+!clips/.gitkeep
+
+# Сборка PyInstaller
+build/
+dist/
+*.spec
+
+# Готовый exe публикуется отдельно в GitHub Releases
+BT-7274_Command.exe
+release/
+
+# Системные и редакторские файлы
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
