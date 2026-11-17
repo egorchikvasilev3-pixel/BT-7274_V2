@@ -1,12 +1,15 @@
 # Публикация БТ-7274 на GitHub
 
-Готовый `BT-7274_Command.exe` не хранится в репозитории: он весит около 50 МБ и публикуется в разделе **Releases**. В репозиторий попадают только исходники, документация и ресурсы.
+Текущий релиз: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.0
+
+Готовый `BT-7274_Command.exe` не хранится в репозитории: он весит около 167 МБ и публикуется в разделе **Releases**. В репозиторий попадают только исходники, документация и ресурсы.
 
 ## 1. Что нужно заранее
 
 - GitHub Desktop установлен: `%LOCALAPPDATA%\GitHubDesktop\GitHubDesktop.exe`.
 - Git из комплекта GitHub Desktop: `%LOCALAPPDATA%\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe`.
-- Выбраны имя репозитория, лицензия и видимость (public/private).
+- Репозиторий: https://github.com/egorchikvasilev3-pixel/BT-7274_V2 (public, ветка `main` защищена).
+- Лицензия: `LICENSE` — все права защищены, исходники опубликованы только для ознакомления.
 - Собран свежий `BT-7274_Command.exe`:
 
 ```powershell
@@ -32,16 +35,16 @@ Get-FileHash BT-7274_Command.exe -Algorithm SHA256
 
 ## 3. Первый коммит
 
-Через GitHub Desktop: **File → Add local repository** → выбрать папку проекта → **Create repository** → заполнить имя, описание и видимость → **Publish repository**.
+Репозиторий уже создан и опубликован. Для нового проекта через GitHub Desktop: **File → Add local repository** → выбрать папку проекта → **Create repository** → заполнить имя, описание и видимость → **Publish repository**.
 
-Или через Git из GitHub Desktop (подставьте своё имя репозитория):
+Или через Git из GitHub Desktop:
 
 ```powershell
 $git = "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe"
 & $git init -b main
 & $git add .
 & $git commit -m "BT-7274 V2: голосовой агент, лаунчер и управление OBS"
-& $git remote add origin https://github.com/<USER>/<REPO>.git
+& $git remote add origin https://github.com/egorchikvasilev3-pixel/BT-7274_V2.git
 & $git push -u origin main
 ```
 
@@ -49,18 +52,22 @@ $git = "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe
 
 ## 4. Выпуск релиза
 
+Релиз `v2.0.0` уже опубликован: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.0
+
+Для следующей версии:
+
 1. Создайте тег версии:
 
 ```powershell
 $git = "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe"
-& $git tag -a v2.0.0 -m "BT-7274 V2"
-& $git push origin v2.0.0
+& $git tag -a v2.0.1 -m "BT-7274 V2.0.1"
+& $git push origin v2.0.1
 ```
 
 2. На GitHub откройте **Releases → Draft a new release**.
-3. Выберите тег `v2.0.0`, название `BT-7274 V2 — голосовой титан`.
-4. Прикрепите `BT-7274_Command.exe` (или zip из папки `release\`).
-5. Вставьте описание из `release\RELEASE_NOTES.md` и SHA256 из `release\SHA256.txt`.
+3. Выберите тег `v2.0.1`, название `BT-7274 V2.0.1`.
+4. Прикрепите zip из папки `release\` (внутри exe, `helmet.webp`, `README.md`, `LICENSE`).
+5. Вставьте описание из `release\RELEASE_NOTES.md`, прикрепите `release\SHA256.txt`.
 6. Опубликуйте релиз.
 
 ## 5. Шаблон описания релиза

@@ -2,7 +2,7 @@
 
 Монолитный голосовой ИИ-комплекс на Python: широкий HUD-командный центр 720×480, прозрачный PySide6-оверлей с волновой анимацией карточки BT, F1-рация, faster-whisper на GPU с резервным CPU-режимом, локальная Ollama `llama3.2:3b`, управление Windows по тегам действий и голос Edge TTS с эффектом шлема Vanguard.
 
-Репозиторий и готовые сборки: [github.com/egorchikvasilev3-pixel/BT-7274_V2](https://github.com/egorchikvasilev3-pixel/BT-7274_V2).
+Репозиторий и готовые сборки: [github.com/egorchikvasilev3-pixel/BT-7274_V2](https://github.com/egorchikvasilev3-pixel/BT-7274_V2). Скачать exe: [Releases](https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases).
 
 ## Запуск
 
