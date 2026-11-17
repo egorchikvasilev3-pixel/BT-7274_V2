@@ -1,6 +1,6 @@
 # Публикация БТ-7274 на GitHub
 
-Текущий релиз: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.0
+Актуальный релиз: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/latest
 
 Готовый `BT-7274_Command.exe` не хранится в репозитории: он весит около 167 МБ и публикуется в разделе **Releases**. В репозиторий попадают только исходники, документация и ресурсы.
 
@@ -14,7 +14,7 @@
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m PyInstaller --noconfirm --clean --onefile --windowed --icon assets\Icon.ico --name BT-7274_Command launcher.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --icon assets\Icon.ico --collect-data faster_whisper --name BT-7274_Command launcher.py
 ```
 
 ## 2. Проверка перед публикацией
@@ -52,7 +52,7 @@ $git = "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe
 
 ## 4. Выпуск релиза
 
-Релиз `v2.0.0` уже опубликован: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.0
+Релиз `v2.0.1` опубликован: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.1
 
 Для следующей версии:
 

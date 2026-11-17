@@ -2,7 +2,7 @@
 
 Монолитный голосовой ИИ-комплекс на Python: широкий HUD-командный центр 720×480, прозрачный PySide6-оверлей с волновой анимацией карточки BT, F1-рация, faster-whisper на GPU с резервным CPU-режимом, локальная Ollama `llama3.2:3b`, управление Windows по тегам действий и голос Edge TTS с эффектом шлема Vanguard.
 
-Репозиторий и готовые сборки: [github.com/egorchikvasilev3-pixel/BT-7274_V2](https://github.com/egorchikvasilev3-pixel/BT-7274_V2). Скачать exe: [Releases](https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases).
+Репозиторий и готовые сборки: [github.com/egorchikvasilev3-pixel/BT-7274_V2](https://github.com/egorchikvasilev3-pixel/BT-7274_V2). Скачать exe: [Releases](https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/latest).
 
 ## Запуск
 
@@ -149,7 +149,7 @@ python -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m PyInstaller --noconfirm --onefile --windowed --icon assets\Icon.ico --name BT-7274_Command launcher.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --icon assets\Icon.ico --collect-data faster_whisper --name BT-7274_Command launcher.py
 ```
 
 В сборку попадают и лаунчер, и голосовой агент: при `--agent` exe запускает встроенный `main.main()` без внешнего Python и `main.py`. Готовый `BT-7274_Command.exe` кладётся в корень проекта.

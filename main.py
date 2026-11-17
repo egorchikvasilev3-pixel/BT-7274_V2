@@ -1684,6 +1684,19 @@ class WhisperEngine:
         except SpeechRecognitionError:
             raise
         except Exception as error:
+            error_text = str(error).lower()
+            if "silero_vad" in error_text or "no_suchfile" in error_text:
+                LOG.warning(
+                    "VAD-модель недоступна, повторяю распознавание без VAD: %s",
+                    error,
+                )
+                try:
+                    return self._transcribe_with(model, audio, vad_filter=False)
+                except Exception as vad_error:
+                    LOG.exception("Ошибка распознавания речи без VAD")
+                    raise SpeechRecognitionError(
+                        "Сбой распознавания речи. Повторите приказ."
+                    ) from vad_error
             device = str(
                 getattr(getattr(model, "model", None), "device", "")
             ).lower()
@@ -1709,20 +1722,25 @@ class WhisperEngine:
             ) from error
 
     @staticmethod
-    def _transcribe_with(model: WhisperModel, audio: np.ndarray) -> str:
-        segments, info = model.transcribe(
-            audio,
-            language="ru",
-            task="transcribe",
-            beam_size=1,
-            best_of=1,
-            temperature=0.0,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 250},
-            condition_on_previous_text=False,
-            without_timestamps=True,
-            initial_prompt="БТ-7274.",
-        )
+    def _transcribe_with(
+        model: WhisperModel,
+        audio: np.ndarray,
+        vad_filter: bool = True,
+    ) -> str:
+        kwargs: dict[str, Any] = {
+            "language": "ru",
+            "task": "transcribe",
+            "beam_size": 1,
+            "best_of": 1,
+            "temperature": 0.0,
+            "vad_filter": vad_filter,
+            "condition_on_previous_text": False,
+            "without_timestamps": True,
+            "initial_prompt": "БТ-7274.",
+        }
+        if vad_filter:
+            kwargs["vad_parameters"] = {"min_silence_duration_ms": 250}
+        segments, info = model.transcribe(audio, **kwargs)
         parts = [segment.text.strip() for segment in segments if segment.text.strip()]
         text = re.sub(r"\s+", " ", " ".join(parts)).strip()
         LOG.info(
