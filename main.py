@@ -21,11 +21,12 @@ import subprocess
 import sys
 import threading
 import time
-import webbrowser
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+
+import preferences
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).resolve().parent
@@ -72,12 +73,14 @@ WHISPER_GPU_COMPUTE_TYPE = "float16"
 WHISPER_CPU_COMPUTE_TYPE = "int8"
 WHISPER_INITIAL_PROMPT = (
     "БТ-7274. Команды пилота: следующий трек, предыдущий трек, пауза, "
-    "продолжить, открой YouTube, включи музыку, сделай запись, останови запись, "
+    "продолжить, открой YouTube, включи музыку, включи Spotify, "
+    "включи ВК музыку, найди в интернете, сделай запись, останови запись, "
     "который час, поставь таймер."
 )
 WHISPER_HOTWORDS = (
     "БТ-7274, следующий трек, предыдущий трек, пауза, продолжить, "
-    "открой YouTube, включи музыку, сделай запись, останови запись, "
+    "открой YouTube, включи музыку, включи Spotify, включи ВК музыку, "
+    "найди в интернете, поищи в Яндексе, сделай запись, останови запись, "
     "поставь таймер, который час, громче, тише, скриншот"
 )
 
@@ -309,7 +312,9 @@ ACTION_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            r"\b(?:открой|запусти)\b.*\b(?:браузер|browser|хром|chrome)\b",
+            r"\b(?:открой|запусти)\b.*\b(?:браузер|browser|хром\w*|chrome|"
+            r"firefox|файрфокс\w*|edge|эдж\w*|опер\w*|opera|brave|брейв\w*|"
+            r"vivaldi|вивальди|яндекс\s*браузер\w*)\b",
             re.IGNORECASE,
         ),
         "OPEN_BROWSER",
@@ -386,11 +391,22 @@ ACTION_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            r"\b(?:открой|открывай|включи|запусти)\b.*\b(?:youtube\s*music|"
-            r"ютуб\s*мьюзик|музык\w*)\b",
+            r"\b(?:открой|открывай|включи|запусти|вруби|поставь)\b.*"
+            r"\b(?:youtube\s*music|ютуб\s*мьюзик|музык\w*|"
+            r"spotify|спотифай|soundcloud|саундклауд|"
+            r"вэка\s*мьюзик\w*|вэка\s*музык\w*|"
+            r"вк\s*музык\w*|vk\s*music|яндекс\s*музык\w*|yandex\s*music)\b",
             re.IGNORECASE,
         ),
         "OPEN_MUSIC",
+    ),
+    (
+        re.compile(
+            r"\b(?:открой|открывай|включи|запусти|вруби|поставь)\b.*"
+            r"\b(?:видео|клип|ролик|фильм|трейлер|мультфильм)\w*\b",
+            re.IGNORECASE,
+        ),
+        "OPEN_YOUTUBE",
     ),
     (
         re.compile(
@@ -564,6 +580,10 @@ LOCAL_LAST_SHOT_RE = re.compile(
     r"\bпоследн\w*\s+(?:скриншот|снимок)\b",
     re.IGNORECASE,
 )
+WEB_SEARCH_RE = re.compile(
+    r"^\s*(?:найди|поищи|поиск|загугли|погугли|ищи)\b",
+    re.IGNORECASE,
+)
 
 
 def diagnostic_kind_from_command(command: str) -> str | None:
@@ -615,8 +635,8 @@ SYSTEM_PROMPT = """Ты — БТ-7274, боевой титан класса «В
 9. Не заканчивай ответ вопросом. Не предлагай дальнейшую помощь.
 
 ТЕГИ ДЕЙСТВИЙ:
-[OPEN_YOUTUBE] — открыть YouTube.
-[OPEN_MUSIC] — открыть YouTube Music.
+[OPEN_YOUTUBE] — открыть YouTube или найти видео, клип, фильм.
+[OPEN_MUSIC] — открыть музыкальный сервис из настроек. Если пилот назвал сервис явно, открыть его.
 [TAKE_SCREENSHOT] — сделать снимок экрана.
 [RECORD_VIDEO_START] — начать запись экрана в OBS Studio в 60 fps. Использовать на приказы «сделай запись», «запиши видео», «начни запись».
 [RECORD_VIDEO_STOP] — остановить запись в OBS Studio. Использовать на приказы «стоп», «хватит», «останови запись».
@@ -631,7 +651,7 @@ SYSTEM_PROMPT = """Ты — БТ-7274, боевой титан класса «В
 [OPEN_CALC] — открыть Калькулятор.
 [OPEN_STEAM] — запустить Steam.
 [OPEN_DISCORD] — запустить Discord.
-[OPEN_BROWSER] — открыть браузер по умолчанию.
+[OPEN_BROWSER] — открыть браузер, выбранный в настройках пилота.
 [WINDOW_MINIMIZE_ALL] — свернуть все окна.
 [WINDOW_CLOSE] — закрыть активное окно.
 [WINDOW_SWITCH] — переключить окно.
@@ -658,8 +678,12 @@ SYSTEM_PROMPT = """Ты — БТ-7274, боевой титан класса «В
 БТ: [MEDIA_NEXT] Переключаю трек, пилот.
 Пилот: «БТ, открой музыку».
 БТ: [OPEN_MUSIC] Музыкальный канал открыт, пилот.
+Пилот: «БТ, включи ВК музыку».
+БТ: [OPEN_MUSIC] Открываю VK Music, пилот.
+Пилот: «БТ, включи клип Titanfall».
+БТ: [OPEN_YOUTUBE] Открываю YouTube, пилот.
 
-Не путай открытие сайта YouTube Music ([OPEN_MUSIC]) с управлением текущим плеером ([MEDIA_NEXT], [MEDIA_PREV], [MEDIA_PLAY_PAUSE]).
+Не путай открытие сайта музыки ([OPEN_MUSIC]) с управлением текущим плеером ([MEDIA_NEXT], [MEDIA_PREV], [MEDIA_PLAY_PAUSE]).
 """
 
 DEPENDENCIES: tuple[tuple[str, str], ...] = (
@@ -1012,6 +1036,26 @@ def build_action_response(action_tag: str, command: str) -> str:
         if action_tag == "VOLUME_UP":
             return "Системная громкость увеличена, пилот."
         return "Системная громкость уменьшена, пилот."
+    if action_tag == "OPEN_MUSIC":
+        provider = preferences.music_service_from_text(command)
+        if preferences.is_video_request(command) and not provider:
+            if preferences.clean_video_query(command):
+                return "Открываю поиск на Ютубе, пилот."
+            return "Открываю Ютуб, пилот."
+        if not provider:
+            provider = preferences.load_settings()["music_service"]
+        return (
+            f"Открываю {preferences.music_service_speech_label(provider)}, пилот."
+        )
+    if action_tag == "OPEN_YOUTUBE":
+        if preferences.clean_video_query(command):
+            return "Открываю поиск на Ютубе, пилот."
+        return "Открываю Ютуб, пилот."
+    if action_tag == "OPEN_BROWSER":
+        browser_key = preferences.browser_from_text(command)
+        if not browser_key:
+            browser_key = preferences.load_settings()["browser"]
+        return f"Открываю {preferences.browser_speech_label(browser_key)}, пилот."
     return DEFAULT_ACTION_RESPONSES.get(
         action_tag,
         "Приказ принят, пилот.",
@@ -3238,11 +3282,40 @@ class ActionExecutor:
 
     def _execute(self, tag: str, command: str = "") -> str:
         if tag == "OPEN_YOUTUBE":
-            webbrowser.open("https://www.youtube.com")
-            return "YouTube открыт"
+            query = preferences.clean_video_query(command)
+            url = preferences.build_youtube_url(query)
+            browser_key = preferences.browser_from_text(command)
+            ok, warning = preferences.launch_url(url, browser_key)
+            if not ok:
+                raise RuntimeError(warning or "Не удалось открыть YouTube.")
+            result = "YouTube открыт"
+            if query:
+                result = f"YouTube: поиск «{query}»"
+            if warning:
+                result = f"{result}. {warning}"
+            return result
         if tag == "OPEN_MUSIC":
-            webbrowser.open("https://music.youtube.com")
-            return "YouTube Music открыт"
+            provider = preferences.music_service_from_text(command)
+            query = preferences.clean_music_query(command)
+            if preferences.is_video_request(command) and not provider:
+                query = preferences.clean_video_query(command)
+                url = preferences.build_youtube_url(query)
+                label = "YouTube"
+            else:
+                if not provider:
+                    provider = preferences.load_settings()["music_service"]
+                url = preferences.build_music_url(query, provider)
+                label = preferences.music_service_label(provider)
+            browser_key = preferences.browser_from_text(command)
+            ok, warning = preferences.launch_url(url, browser_key)
+            if not ok:
+                raise RuntimeError(warning or f"Не удалось открыть {label}.")
+            result = f"{label} открыт"
+            if query:
+                result = f"{label}: поиск «{query}»"
+            if warning:
+                result = f"{result}. {warning}"
+            return result
         if tag == "TAKE_SCREENSHOT":
             return self._take_screenshot()
         if tag == "RECORD_VIDEO_START":
@@ -3321,9 +3394,20 @@ class ActionExecutor:
                 subprocess.Popen([str(update), "--processStart", "Discord.exe"])
             return "Discord запущен"
         if tag == "OPEN_BROWSER":
-            if not webbrowser.open("https://www.google.com"):
-                raise RuntimeError("Не удалось открыть браузер по умолчанию.")
-            return "Браузер открыт"
+            browser_key = preferences.browser_from_text(command)
+            if not browser_key:
+                browser_key = preferences.load_settings()["browser"]
+            ok, warning = preferences.launch_url(
+                "https://www.google.com", browser_key
+            )
+            if not ok:
+                raise RuntimeError(
+                    warning or "Не удалось открыть браузер из настроек."
+                )
+            result = f"Браузер {preferences.browser_label(browser_key)} открыт"
+            if warning:
+                result = f"{result}. {warning}"
+            return result
         if tag == "WINDOW_MINIMIZE_ALL":
             self._send_win_hotkey(0x4D)
             return "Все окна свёрнуты"
@@ -3530,6 +3614,24 @@ class BT7274Controller(QObject):
                 "Запись не активна, пилот.",
                 "Системная громкость увеличена, пилот.",
                 "Системная громкость уменьшена, пилот.",
+            )
+        )
+        phrases.extend(
+            f"Открываю {preferences.music_service_speech_label(key)}, пилот."
+            for key in preferences.MUSIC_SERVICE_SPEECH_LABELS
+        )
+        phrases.extend(
+            f"Открываю {preferences.browser_speech_label(key)}, пилот."
+            for key in preferences.BROWSER_SPEECH_LABELS
+        )
+        phrases.extend(
+            (
+                "Открываю поиск на Ютубе, пилот.",
+                "Открываю Ютуб, пилот.",
+                "Ютуб открыт, пилот.",
+                "Поиск видео на Ютубе открыт, пилот.",
+                "Поиск в Гугле открыт, пилот.",
+                "Поиск в Яндексе открыт, пилот.",
             )
         )
         phrases.extend(response for _, response in FIXED_DIALOGUE)
@@ -4031,6 +4133,9 @@ class BT7274Controller(QObject):
             self._emit_response("Последний клип открыт, пилот.")
             return True
 
+        if WEB_SEARCH_RE.match(text):
+            return self._handle_web_search(text)
+
         hinted_action = infer_action_from_command(text)
         if hinted_action in {"OBS_PAUSE", "OBS_RESUME", "OBS_NEXT_SCENE"}:
             LOG.info("Локально: OBS %s", hinted_action)
@@ -4044,6 +4149,50 @@ class BT7274Controller(QObject):
             return True
 
         return False
+
+    def _handle_web_search(self, command: str) -> bool:
+        """Открывает поиск: видео — на YouTube, остальное — в выбранном поисковике."""
+        browser_key = preferences.browser_from_text(command)
+
+        if preferences.is_video_request(command):
+            query = preferences.clean_video_query(command)
+            url = preferences.build_youtube_url(query)
+            LOG.info("Локально: поиск видео «%s» на YouTube", query or "без запроса")
+            ok, warning = preferences.launch_url(url, browser_key)
+            if not ok:
+                self._emit_response(warning or "Не удалось открыть YouTube, пилот.")
+                return True
+            if query:
+                response = f"Поиск видео на YouTube: {query}."
+                speech = "Поиск видео на Ютубе открыт, пилот."
+            else:
+                response = "YouTube открыт, пилот."
+                speech = "Ютуб открыт, пилот."
+            if warning:
+                response = f"{response} {warning}"
+            self._emit_response(response, speech)
+            return True
+
+        query = preferences.clean_search_query(command)
+        if not query:
+            self._emit_response("Уточните поисковый запрос, пилот.")
+            return True
+        engine = preferences.search_engine_from_text(command)
+        if not engine:
+            engine = preferences.load_settings()["search_engine"]
+        url = preferences.build_search_url(query, engine)
+        LOG.info("Локально: поиск «%s» в %s", query, engine)
+        ok, warning = preferences.launch_url(url, browser_key)
+        if not ok:
+            self._emit_response(warning or "Не удалось открыть поиск, пилот.")
+            return True
+        label = preferences.search_engine_label(engine)
+        speech_in = preferences.search_engine_speech_in(engine)
+        response = f"Поиск в {label}: {query}."
+        if warning:
+            response = f"{response} {warning}"
+        self._emit_response(response, f"Поиск в {speech_in} открыт, пилот.")
+        return True
 
     def _run_recording_tag(self, tag: str) -> str:
         if tag == "RECORD_VIDEO_START":

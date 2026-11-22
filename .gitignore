@@ -9,6 +9,8 @@ venv/
 .bt7274.lock
 data/shutdown.request
 data/notes.txt
+data/settings.json
+data/settings.json.tmp
 
 # Сгенерированные данные
 logs/*.log*

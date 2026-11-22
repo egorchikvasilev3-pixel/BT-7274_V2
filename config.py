@@ -98,6 +98,42 @@ QTextEdit {{
     font-size: 10pt;
     padding: 8px;
 }}
+QComboBox {{
+    background-color: {PANEL_BG};
+    color: #eafcff;
+    border: 2px solid {NEON_BLUE};
+    border-radius: 4px;
+    font-family: {FONT_FAMILY};
+    font-size: 9pt;
+    padding: 3px 10px;
+}}
+QComboBox:hover {{
+    border-color: #bfe6ff;
+}}
+QComboBox:focus {{
+    border-color: {NEON_GREEN};
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 26px;
+}}
+QComboBox::down-arrow {{
+    image: none;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 7px solid {NEON_BLUE};
+    margin-right: 8px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: #081422;
+    color: #eafcff;
+    border: 1px solid {NEON_BLUE};
+    selection-background-color: {NEON_BLUE};
+    selection-color: {BG_BOTTOM};
+    font-family: {FONT_FAMILY};
+    font-size: 9pt;
+    outline: none;
+}}
 QScrollArea {{
     background: transparent;
     border: 1px solid {NEON_BLUE};

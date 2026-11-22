@@ -44,7 +44,13 @@ from core import (
     resolve_python_gui,
     terminate_bt_by_lock,
 )
-from screens import GalleryScreen, HistoryScreen, MenuScreen, VideoScreen
+from screens import (
+    GalleryScreen,
+    HistoryScreen,
+    MenuScreen,
+    SettingsScreen,
+    VideoScreen,
+)
 
 SHUTDOWN_REQUEST_FILE = os.path.join(BASE_DIR, "data", "shutdown.request")
 GRACEFUL_SHUTDOWN_SECONDS = 5.0
@@ -110,7 +116,14 @@ class LauncherWindow(QWidget):
         self.history = HistoryScreen()
         self.gallery = GalleryScreen()
         self.videos = VideoScreen()
-        for screen in (self.menu, self.history, self.gallery, self.videos):
+        self.settings = SettingsScreen(BASE_DIR)
+        for screen in (
+            self.menu,
+            self.history,
+            self.gallery,
+            self.videos,
+            self.settings,
+        ):
             self.stack.addWidget(screen)
 
         layout = QVBoxLayout(self)
@@ -142,11 +155,14 @@ class LauncherWindow(QWidget):
         self.menu.screenshots_requested.connect(self.show_gallery)
         self.menu.videos_requested.connect(self.show_videos)
         self.menu.ollama_requested.connect(self.check_ollama_async)
+        self.menu.settings_requested.connect(self.show_settings)
         self.menu.exit_requested.connect(self.exit_launcher)
         self.history.back_requested.connect(self.show_menu)
         self.gallery.back_requested.connect(self.show_menu)
         self.videos.back_requested.connect(self.show_menu)
         self.videos.video_requested.connect(self.play_video)
+        self.settings.back_requested.connect(self.show_menu)
+        self.settings.saved.connect(self.on_settings_saved)
 
     def center_on_screen(self):
         """Центрирует окно по доступной области основного экрана Windows."""
@@ -216,6 +232,15 @@ class LauncherWindow(QWidget):
         self.videos.reload()
         self.stack.setCurrentWidget(self.videos)
         self.menu.show_log(f"АРХИВ ВИДЕО ОТКРЫТ. КЛИПОВ: {len(list_videos())}", NEON_BLUE)
+
+    def show_settings(self):
+        """Открывает настройки браузера, музыки и поиска."""
+        self.settings.reload()
+        self.stack.setCurrentWidget(self.settings)
+
+    def on_settings_saved(self, message):
+        """Показывает подтверждение сохранения на главном экране."""
+        self.menu.show_log(str(message), NEON_GREEN)
 
     def play_video(self, path):
         """Запускает видео стандартным плеером Windows; список остаётся внутри лаунчера."""
