@@ -52,7 +52,7 @@ $git = "$env:LOCALAPPDATA\GitHubDesktop\app-3.6.11\resources\app\git\cmd\git.exe
 
 ## 4. Выпуск релиза
 
-Релиз `v2.0.2` опубликован: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.2
+Релиз `v2.0.3` опубликован: https://github.com/egorchikvasilev3-pixel/BT-7274_V2/releases/tag/v2.0.3
 
 Для следующей версии (пример — `v2.0.3`):
 
