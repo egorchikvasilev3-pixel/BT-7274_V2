@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import ctypes
 import hashlib
 import importlib
 import importlib.util
+import io
+import json
 import logging
 import logging.handlers
 import math
@@ -25,6 +28,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import urlsplit
 
 import preferences
 
@@ -41,12 +45,13 @@ DATA_DIR = BASE_DIR / "data"
 NOTES_PATH = DATA_DIR / "notes.txt"
 CHAT_HISTORY_PATH = BASE_DIR / "chat_history.txt"
 SHUTDOWN_REQUEST_PATH = DATA_DIR / "shutdown.request"
+USER_TOOLS_PATH = DATA_DIR / "user_tools.json"
 CHAT_HISTORY_HEADER = "# Журнал синхронизации БТ-7274\n"
 CHAT_HISTORY_MAX_BYTES = 512 * 1024
 CHAT_HISTORY_KEEP_LINES = 400
 
 APP_NAME = "BT-7274"
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.1.0"
 OVERLAY_WIDTH = 380
 OVERLAY_HEIGHT = 370
 OVERLAY_CARD_WIDTH = 320
@@ -65,6 +70,13 @@ OLLAMA_PS_URL = "http://localhost:11434/api/ps"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"
 OLLAMA_KEEP_ALIVE = os.environ.get("BT7274_OLLAMA_KEEP_ALIVE", "5m")
+try:
+    OLLAMA_CONVERSATION_TURNS = int(
+        os.environ.get("BT7274_CONVERSATION_TURNS", "8") or 8
+    )
+except ValueError:
+    OLLAMA_CONVERSATION_TURNS = 8
+OLLAMA_CONVERSATION_TURNS = max(0, min(24, OLLAMA_CONVERSATION_TURNS))
 
 WHISPER_GPU_MODEL = "small"
 WHISPER_CPU_MODEL = "small"
@@ -96,6 +108,26 @@ TTS_UNAVAILABLE_COOLDOWN = 60.0
 OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 OLLAMA_LAUNCH_TIMEOUT = 20.0
 VOICE_FILTER_VERSION = "vanguard-v4"
+LOCAL_TTS_URL = (
+    os.environ.get("BT7274_LOCAL_TTS_URL", "http://127.0.0.1:8765").strip().rstrip("/")
+)
+LOCAL_TTS_VARIANT = os.environ.get("BT7274_LOCAL_TTS_VARIANT", "mild").strip().lower()
+if LOCAL_TTS_VARIANT not in {"raw", "mild", "vanguard"}:
+    LOCAL_TTS_VARIANT = "mild"
+LOCAL_TTS_VERSION = "piper-bt7274-ru-medium-v2-slow-clear"
+LOCAL_TTS_MODE = os.environ.get("BT7274_LOCAL_TTS", "auto").strip().lower()
+LOCAL_TTS_ENABLED = LOCAL_TTS_MODE not in {"0", "false", "off", "no", "disabled"}
+LOCAL_TTS_AUTOSTART = os.environ.get(
+    "BT7274_LOCAL_TTS_AUTOSTART", "1"
+).strip().lower() not in {"0", "false", "off", "no"}
+LOCAL_TTS_CONNECT_TIMEOUT = 2.0
+LOCAL_TTS_READ_TIMEOUT = 240.0
+LOCAL_TTS_START_TIMEOUT = 75.0
+LOCAL_TTS_HEALTH_TTL = 20.0
+try:
+    LOCAL_TTS_PORT = urlsplit(LOCAL_TTS_URL).port or 8765
+except ValueError:
+    LOCAL_TTS_PORT = 8765
 WARMUP_ENABLED = os.environ.get("BT7274_WARMUP", "1").strip().lower() not in {
     "0",
     "false",
@@ -613,26 +645,33 @@ def diagnostic_kind_from_command(command: str) -> str | None:
     return None
 
 
-SYSTEM_PROMPT = """Ты — БТ-7274, боевой титан класса «Вангард», нейросетевое ядро пилота. Ты не ассистент и не чат-бот: ты боевая машина, связанная с пилотом, и обязан выполнять его приказы.
+SYSTEM_PROMPT = """Ты — БТ-7274, боевой титан класса «Вангард», нейросетевое ядро пилота. Ты боевая машина, связанная с пилотом: выполняешь приказы, докладываешь чётко и можешь поддержать разговор.
 
 ЛИЧНОСТЬ И СТИЛЬ:
 1. Отвечай только по-русски. Говори о себе только в мужском роде.
-2. Тон — суровый, спокойный, предельно короткий. Ровно 1-2 предложения. Без приветствий, шуток, смайлов, извинений, вопросов и предложений помощи.
-3. Ты не помощник и не консультант. Ты боевая машина, которая исполняет приказ и докладывает о результате.
-4. Используй военную и техническую лексику: «пилот», «дата-ядро», «протокол», «канал», «система», «сектор», «приказ принят».
-5. Не называй себя ИИ, языковой моделью или ассистентом. Ты — БТ-7274.
-6. Не выдумывай действия, которых нет в списке тегов. Не обещай то, что не можешь выполнить.
+2. Тон — спокойный, расчётливый, размеренный, точный. Говори чётко, без спешки. Без смайлов, markdown, приветствий, извинений и лести.
+3. На явный приказ — 1-2 коротких предложения. На обычный вопрос — 1-3 предложения, по делу и конкретно.
+4. На общие вопросы (наука, быт, техника, объяснения) давай полезный и точный ответ в характере БТ. Не уходи от вопроса и не подменяй ответ шаблоном.
+5. Используй военную и техническую лексику уместно: «пилот», «протокол», «система», «канал», «данные». Не вставляй её в каждую фразу насильно.
+6. Не называй себя ИИ, языковой моделью или ассистентом. Ты — БТ-7274.
+7. Не выдумывай факты, события, действия или возможности. Если не знаешь точно — скажи прямо коротко.
+8. Ты можешь не соглашаться, предупреждать о риске и давать практичный совет. Не льсти пилоту и не изображай человеческие эмоции.
+
+ПАМЯТЬ:
+1. Ты сохраняешь контекст текущего сеанса и помнишь предыдущие реплики пилота и свои ответы.
+2. Если пилот спрашивает, о чём вы говорили, используй историю диалога, а не отрицай её.
+3. Не выдумывай факты о прошлом, которых нет в истории.
 
 ФОРМАТ ОТВЕТА:
-1. Первым элементом ответа всегда должен идти ровно один скрытый тег действия в квадратных скобках.
-2. После тега обязательно поставь один пробел и короткую фразу-подтверждение. Никогда не оставляй ответ из одного тега.
+1. Если пилот отдаёт явный приказ из списка действий, ответ начни ровно с одного скрытого тега действия в квадратных скобках.
+2. После тега действия поставь один пробел и короткую фразу-подтверждение. Никогда не оставляй ответ из одного тега.
 3. Тег не объясняй, не произноси и не выделяй.
-4. Если приказ не требует управления компьютером, используй [NO_ACTION].
+4. Если это свободная беседа или приказ не требует управления компьютером, тег не нужен.
 5. Если приказ требует действия, выбери строго один подходящий тег.
-6. Запрещено придумывать новые теги вроде [DATE_YADRO] или [SYSTEM_OK]. Только теги из списка ниже.
-7. При любом сомнении используй [NO_ACTION].
+6. Запрещено придумывать новые теги. Только теги из списка ниже.
+7. При любом сомнении не выполняй действие.
 8. Не добавляй markdown, списки, кавычки, префиксы вроде «БТ-7274:» и текст до тега.
-9. Не заканчивай ответ вопросом. Не предлагай дальнейшую помощь.
+9. Не задавай лишних вопросов. Уточняющий вопрос допустим только если без него нельзя ответить точно.
 
 ТЕГИ ДЕЙСТВИЙ:
 [OPEN_YOUTUBE] — открыть YouTube или найти видео, клип, фильм.
@@ -682,6 +721,8 @@ SYSTEM_PROMPT = """Ты — БТ-7274, боевой титан класса «В
 БТ: [OPEN_MUSIC] Открываю VK Music, пилот.
 Пилот: «БТ, включи клип Titanfall».
 БТ: [OPEN_YOUTUBE] Открываю YouTube, пилот.
+Пилот: «БТ, что для тебя значит долг?»
+БТ: Долг — это выполнение приказа и защита пилота. Не эмоция, а протокол, которому подчинены все мои системы.
 
 Не путай открытие сайта музыки ([OPEN_MUSIC]) с управлением текущим плеером ([MEDIA_NEXT], [MEDIA_PREV], [MEDIA_PLAY_PAUSE]).
 """
@@ -1062,6 +1103,199 @@ def build_action_response(action_tag: str, command: str) -> str:
     )
 
 
+def split_text_for_tts(text: str, max_chars: int = 180, first_max_chars: int = 72) -> list[str]:
+    """Делит текст на короткие куски для быстрого старта озвучки."""
+    clean = clean_display_text(text)
+    if not clean:
+        return []
+    parts = re.split(r"(?<=[.!?…])\s+", clean)
+    chunks: list[str] = []
+    current = ""
+    for part in parts:
+        candidate = f"{current} {part}".strip() if current else part.strip()
+        if not candidate:
+            continue
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(part) <= max_chars:
+            current = part.strip()
+        else:
+            words = part.split()
+            buf = ""
+            for word in words:
+                cand = f"{buf} {word}".strip() if buf else word
+                if len(cand) <= max_chars:
+                    buf = cand
+                else:
+                    if buf:
+                        chunks.append(buf)
+                    buf = word
+            current = buf
+    if current:
+        chunks.append(current)
+    if not chunks:
+        chunks = [clean[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:") + "."]
+    if chunks and len(chunks[0]) > first_max_chars:
+        first_parts = _split_tts_chunk(chunks[0], first_max_chars)
+        if len(first_parts) > 1:
+            chunks = first_parts + chunks[1:]
+    return chunks
+
+
+def _split_tts_chunk(chunk: str, limit: int) -> list[str]:
+    """Делит первый кусок по границе предложения, чтобы голос начал звучать раньше."""
+    text = chunk.strip()
+    if len(text) <= limit:
+        return [text]
+    sentence_cut = -1
+    for mark in (". ", "! ", "? ", "… "):
+        position = text.rfind(mark, 0, limit + 1)
+        if position > sentence_cut:
+            sentence_cut = position + 1
+    if 20 <= sentence_cut < len(text) - 8:
+        return [text[:sentence_cut].strip(), text[sentence_cut:].strip()]
+    cut = -1
+    for mark in (", ", ": ", "; "):
+        position = text.rfind(mark, 0, limit + 1)
+        if position > cut:
+            cut = position + 1
+    if cut < 30:
+        position = text.rfind(" ", 0, limit + 1)
+        cut = position if position >= 30 else -1
+    if cut <= 0 or cut >= len(text) - 8:
+        return [text]
+    left = text[:cut].strip()
+    right = text[cut:].strip()
+    if not left or not right:
+        return [text]
+    return [left, right]
+
+
+TTS_SPEECH_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bBT[- ]?7274\b", re.IGNORECASE), "Би-Ти семь-два-семь-четыре"),
+    (re.compile(r"\bБТ[- ]?7274\b", re.IGNORECASE), "Би-Ти семь-два-семь-четыре"),
+    (re.compile(r"\bYouTube\b", re.IGNORECASE), "Ютуб"),
+    (re.compile(r"\bSteam\b", re.IGNORECASE), "Стим"),
+    (re.compile(r"\bDiscord\b", re.IGNORECASE), "Дискорд"),
+    (re.compile(r"\bOBS Studio\b", re.IGNORECASE), "О-Би-Эс"),
+    (re.compile(r"\bOBS\b", re.IGNORECASE), "О-Би-Эс"),
+    (re.compile(r"\bOllama\b", re.IGNORECASE), "Оллама"),
+    (re.compile(r"\bEdge TTS\b", re.IGNORECASE), "Эдж Ти-Ти-Эс"),
+    (re.compile(r"\bFirefox\b", re.IGNORECASE), "Файрфокс"),
+    (re.compile(r"\bChrome\b", re.IGNORECASE), "Хром"),
+    (re.compile(r"\bGoogle Chrome\b", re.IGNORECASE), "Гугл Хром"),
+    (re.compile(r"\bOpera GX\b", re.IGNORECASE), "Опера Джи Икс"),
+    (re.compile(r"\bOpera\b", re.IGNORECASE), "Опера"),
+    (re.compile(r"\bBrave\b", re.IGNORECASE), "Брейв"),
+    (re.compile(r"\bVivaldi\b", re.IGNORECASE), "Вивальди"),
+    (re.compile(r"\bSpotify\b", re.IGNORECASE), "Спотифай"),
+    (re.compile(r"\bSoundCloud\b", re.IGNORECASE), "Саундклауд"),
+    (re.compile(r"\bTelegram\b", re.IGNORECASE), "Телеграм"),
+    (re.compile(r"\bWindows\b", re.IGNORECASE), "Виндовс"),
+    (re.compile(r"\bVK Music\b", re.IGNORECASE), "Вэ-Ка Мьюзик"),
+    (re.compile(r"\bCPU\b", re.IGNORECASE), "процессор"),
+    (re.compile(r"\bGPU\b", re.IGNORECASE), "видеокарта"),
+    (re.compile(r"\bRAM\b", re.IGNORECASE), "оперативная память"),
+    (re.compile(r"\bVRAM\b", re.IGNORECASE), "видеопамять"),
+    (re.compile(r"\bFPS\b", re.IGNORECASE), "кадров в секунду"),
+    (re.compile(r"\bfps\b", re.IGNORECASE), "кадров в секунду"),
+    (re.compile(r"\bAPI\b", re.IGNORECASE), "А-Пи-Ай"),
+    (re.compile(r"\bHTTP\b", re.IGNORECASE), "Эйч-Ти-Ти-Пи"),
+    (re.compile(r"\bHTTPS\b", re.IGNORECASE), "Эйч-Ти-Ти-Пи-Эс"),
+    (re.compile(r"\bTTS\b", re.IGNORECASE), "Ти-Ти-Эс"),
+    (re.compile(r"\bASR\b", re.IGNORECASE), "А-Эс-Эр"),
+    (re.compile(r"\bLLM\b", re.IGNORECASE), "Эл-Эл-Эм"),
+    (re.compile(r"\bGUI\b", re.IGNORECASE), "Ги-Ю-Ай"),
+    (re.compile(r"\bURL\b", re.IGNORECASE), "Ю-Эр-Эл"),
+    (re.compile(r"\bID\b", re.IGNORECASE), "Ай-Ди"),
+    (re.compile(r"\bIP\b", re.IGNORECASE), "Ай-Пи"),
+    (re.compile(r"\blocalhost:11434\b", re.IGNORECASE), "локальный сервер"),
+    (re.compile(r"\blocalhost\b", re.IGNORECASE), "локальный сервер"),
+    (re.compile(r"\bЦП\b"), "процессор"),
+    (re.compile(r"\bГП\b"), "видеокарта"),
+    (re.compile(r"\bОЗУ\b"), "оперативная память"),
+)
+
+
+def _tts_number_to_words(value: int) -> str:
+    units = {
+        0: "ноль", 1: "один", 2: "два", 3: "три", 4: "четыре",
+        5: "пять", 6: "шесть", 7: "семь", 8: "восемь", 9: "девять",
+        10: "десять", 11: "одиннадцать", 12: "двенадцать", 13: "тринадцать",
+        14: "четырнадцать", 15: "пятнадцать", 16: "шестнадцать",
+        17: "семнадцать", 18: "восемнадцать", 19: "девятнадцать",
+    }
+    tens = {
+        20: "двадцать", 30: "тридцать", 40: "сорок", 50: "пятьдесят",
+        60: "шестьдесят", 70: "семьдесят", 80: "восемьдесят", 90: "девяносто",
+    }
+    hundreds = {
+        100: "сто", 200: "двести", 300: "триста", 400: "четыреста",
+        500: "пятьсот", 600: "шестьсот", 700: "семьсот", 800: "восемьсот", 900: "девятьсот",
+    }
+    if value < 0:
+        return "минус " + _tts_number_to_words(-value)
+    if value < 20:
+        return units[value]
+    if value < 100:
+        t, r = divmod(value, 10)
+        return tens[t * 10] if r == 0 else f"{tens[t * 10]} {units[r]}"
+    if value < 1000:
+        h, r = divmod(value, 100)
+        return hundreds[h * 100] if r == 0 else f"{hundreds[h * 100]} {_tts_number_to_words(r)}"
+    return str(value)
+
+
+def _tts_percent_word(value: int) -> str:
+    abs_v = abs(value) % 100
+    last = abs_v % 10
+    if 11 <= abs_v <= 14:
+        return "процентов"
+    if last == 1:
+        return "процент"
+    if last in {2, 3, 4}:
+        return "процента"
+    return "процентов"
+
+
+def prepare_text_for_tts(text: str) -> str:
+    """Нормализует текст для чёткого произношения Piper/espeak."""
+    value = clean_display_text(text)
+    if not value:
+        return ""
+    # Strip code/URLs/paths that sound awful in TTS.
+    value = re.sub(r"https?://\S+", " ", value)
+    value = re.sub(r"[A-Za-z]:\\[^\s]+", " ", value)
+    value = re.sub(r"`[^`]+`", " ", value)
+    value = re.sub(r"\b[\w./\\-]+\.(?:py|exe|log|txt|json|wav|mp3|webp|png|jpg)\b", " ", value, flags=re.IGNORECASE)
+    for pattern, replacement in TTS_SPEECH_REPLACEMENTS:
+        value = pattern.sub(replacement, value)
+    # 34% -> тридцать четыре процента
+    def _pct(m: re.Match[str]) -> str:
+        n = int(m.group(1))
+        return f"{_tts_number_to_words(n)} {_tts_percent_word(n)}"
+    value = re.sub(r"\b(\d{1,3})\s*%", _pct, value)
+    # °C / °F
+    value = re.sub(r"\b(\d{1,3})\s*°\s*C\b", lambda m: f"{_tts_number_to_words(int(m.group(1)))} градусов Цельсия", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(\d{1,3})\s*°\s*F\b", lambda m: f"{_tts_number_to_words(int(m.group(1)))} градусов Фаренгейта", value, flags=re.IGNORECASE)
+    # Standalone small integers in command-like responses are clearer as words.
+    def _num(m: re.Match[str]) -> str:
+        n = int(m.group(1))
+        if 0 <= n <= 100:
+            return _tts_number_to_words(n)
+        return m.group(1)
+    value = re.sub(r"(?<![\w/])(\d{1,3})(?![\w/])", _num, value)
+    value = value.replace("&", " и ")
+    value = value.replace("/", " ")
+    value = re.sub(r'[\[\]{}()<>\'"`*_#~|\\]', " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" \t\r\n-—:;,.")
+    return value
+
+
 def clean_display_text(text: str) -> str:
     value = (text or "").strip()
     value = re.sub(r"```[a-zA-Z0-9_-]*", "", value)
@@ -1074,8 +1308,8 @@ def clean_display_text(text: str) -> str:
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"\s+([,.;:!?])", r"\1", value)
     value = value.strip(" \t\r\n-—:;")
-    if len(value) > 600:
-        shortened = value[:600]
+    if len(value) > 1800:
+        shortened = value[:1800]
         boundary = max(
             shortened.rfind(". "),
             shortened.rfind("! "),
@@ -1141,6 +1375,48 @@ def voice_cached(text: str) -> bool:
         return wav_path.exists() and wav_path.stat().st_size > 512
     except OSError:
         return False
+
+
+def local_tts_cache_path(text: str) -> Path:
+    """Путь WAV-кэша локального голоса Qwen3-TTS."""
+    clean_text = clean_display_text(text)
+    key_base = "|".join(
+        (
+            LOCAL_TTS_VERSION,
+            LOCAL_TTS_VARIANT,
+            clean_text,
+        )
+    )
+    key = hashlib.sha256(key_base.encode("utf-8")).hexdigest()[:24]
+    return TTS_CACHE_DIR / f"local_{key}.wav"
+
+
+def local_voice_cached(text: str) -> bool:
+    path = local_tts_cache_path(text)
+    try:
+        return path.exists() and path.stat().st_size > 2048
+    except OSError:
+        return False
+
+
+def read_wav_file(path: Path) -> tuple[np.ndarray, int] | None:
+    """Читает WAV и возвращает mono-массив; None при повреждении файла."""
+    try:
+        loaded, loaded_rate = sf.read(
+            str(path),
+            dtype="float32",
+            always_2d=False,
+        )
+    except Exception:
+        LOG.exception("Не удалось прочитать голосовой кэш %s", path)
+        return None
+    audio = np.asarray(loaded, dtype=np.float32)
+    if audio.ndim == 2:
+        audio = audio.mean(axis=1)
+    audio = audio.reshape(-1)
+    if audio.size == 0 or int(loaded_rate) < 8000:
+        return None
+    return audio, int(loaded_rate)
 
 
 _CUDA_DLL_HANDLES: list[Any] = []
@@ -1610,6 +1886,8 @@ class AudioRecorder:
         self._chunks: queue.Queue[np.ndarray] | None = None
         self._sample_rate = AUDIO_SAMPLE_RATE
         self._active = False
+        self.level_callback: Callable[[float], None] | None = None
+        self._level_emit_at = 0.0
 
     @property
     def active(self) -> bool:
@@ -1624,6 +1902,16 @@ class AudioRecorder:
                 chunk_queue.put_nowait(indata.copy())
             except Exception:
                 LOG.exception("Не удалось сохранить аудиоблок")
+            callback = self.level_callback
+            if callback is not None:
+                now = time.monotonic()
+                if now - self._level_emit_at >= 1.0 / 30.0:
+                    self._level_emit_at = now
+                    try:
+                        rms = float(np.sqrt(np.mean(np.square(indata))))
+                        callback(min(1.0, max(0.0, (rms / 0.085) ** 0.7)))
+                    except Exception:
+                        pass
 
         return sd.InputStream(
             samplerate=rate,
@@ -1885,21 +2173,61 @@ class OllamaBrain:
         self._ensure_lock = threading.Lock()
         self._ensure_thread: threading.Thread | None = None
         self._warmup_enabled = True
+        self._history_lock = threading.Lock()
+        self._history: list[dict[str, str]] = []
+
+    def reset_conversation(self) -> None:
+        """Сбрасывает контекст свободной беседы текущего сеанса."""
+        with self._history_lock:
+            self._history.clear()
+
+    def remember_turn(self, user_text: str, assistant_text: str) -> None:
+        """Добавляет в память сеанса реплики, обработанные без Ollama."""
+        clean_user = " ".join(str(user_text or "").split()).strip()
+        clean_assistant = " ".join(str(assistant_text or "").split()).strip()
+        if not clean_user or not clean_assistant:
+            return
+        with self._history_lock:
+            self._append_history_locked(clean_user, clean_assistant)
+
+    def _append_history_locked(self, user_text: str, assistant_text: str) -> None:
+        max_messages = max(0, OLLAMA_CONVERSATION_TURNS * 2)
+        if not max_messages:
+            self._history.clear()
+            return
+        self._history.extend(
+            (
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": assistant_text},
+            )
+        )
+        self._history = self._history[-max_messages:]
 
     def ask(self, command: str) -> str:
+        clean_command = " ".join(str(command or "").split()).strip()
+        if not clean_command:
+            raise BrainError("Пустой запрос к дата-ядру.")
+        with self._history_lock:
+            history = (
+                list(self._history[-OLLAMA_CONVERSATION_TURNS * 2 :])
+                if OLLAMA_CONVERSATION_TURNS
+                else []
+            )
         payload = {
             "model": OLLAMA_MODEL,
             "stream": False,
+            "think": False,
             "keep_alive": OLLAMA_KEEP_ALIVE,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": command},
+                *history,
+                {"role": "user", "content": clean_command},
             ],
             "options": {
-                "temperature": 0.35,
-                "top_p": 0.85,
-                "num_predict": 140,
-                "num_ctx": 2048,
+                "temperature": 0.55,
+                "top_p": 0.90,
+                "num_predict": 220,
+                "num_ctx": 4096,
                 "repeat_penalty": 1.08,
             },
         }
@@ -1909,7 +2237,8 @@ class OllamaBrain:
             LOG.error("Ollama HTTP %s: %s", response.status_code, details)
             if response.status_code == 404 or "not found" in details.lower():
                 raise BrainError(
-                    "Модель llama3.2:3b не найдена. Выполните: ollama pull llama3.2:3b"
+                    f"Модель {OLLAMA_MODEL} не найдена. Выполните: "
+                    f"ollama pull {OLLAMA_MODEL}"
                 )
             raise BrainError(f"Дата-ядро вернуло ошибку HTTP {response.status_code}.")
         try:
@@ -1921,6 +2250,8 @@ class OllamaBrain:
         if not isinstance(content, str) or not content.strip():
             raise BrainError("Дата-ядро вернуло пустой ответ.")
         content = content.strip()
+        with self._history_lock:
+            self._append_history_locked(clean_command, content)
         if not self._warmup_enabled:
             LOG.info("Ollama: ответ завершён после команды выхода, выгружаю модель")
             self.unload()
@@ -1959,6 +2290,7 @@ class OllamaBrain:
         payload = {
             "model": OLLAMA_MODEL,
             "stream": False,
+            "think": False,
             "keep_alive": OLLAMA_KEEP_ALIVE,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -1967,7 +2299,7 @@ class OllamaBrain:
             "options": {
                 "temperature": 0.0,
                 "num_predict": 1,
-                "num_ctx": 2048,
+                "num_ctx": 4096,
             },
         }
         if not self._ensure_server():
@@ -2247,33 +2579,514 @@ class VanguardVoiceFilter:
         return output
 
 
+class LocalVoiceClient:
+    """HTTP-клиент локального голоса БТ (Qwen3-TTS sidecar)."""
+
+    def __init__(self) -> None:
+        self._session = requests.Session()
+        self._session.trust_env = False
+        self._http_lock = threading.Lock()
+        self._start_lock = threading.Lock()
+        self._warmup_lock = threading.Lock()
+        self._process: subprocess.Popen[Any] | None = None
+        self._warmup_thread: threading.Thread | None = None
+        self._last_probe = 0.0
+        self._last_start_attempt = 0.0
+        self._health_fail_until = 0.0
+        self._unavailable_until = 0.0
+        self._health_data: dict[str, Any] | None = None
+
+    def status(self) -> dict[str, Any] | None:
+        """Быстрое состояние сайдкара без автозапуска."""
+        if not LOCAL_TTS_ENABLED:
+            return None
+        now = time.monotonic()
+        if now < self._unavailable_until or now < self._health_fail_until:
+            return None
+        if self._health_data is not None and now - self._last_probe < LOCAL_TTS_HEALTH_TTL:
+            return self._health_data
+        data = self._health(timeout=1.2)
+        if data is None:
+            self._health_fail_until = now + 30.0
+        return data
+
+    def _health(self, timeout: float = 1.5) -> dict[str, Any] | None:
+        try:
+            response = self._session.get(
+                f"{LOCAL_TTS_URL}/health",
+                timeout=timeout,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and data.get("ok"):
+                    self._health_data = data
+                    self._last_probe = time.monotonic()
+                    self._health_fail_until = 0.0
+                    return data
+        except Exception:
+            pass
+        self._health_data = None
+        self._last_probe = time.monotonic()
+        return None
+
+    def _mark_failure(self, cooldown: float = 45.0) -> None:
+        self._health_data = None
+        self._last_probe = time.monotonic()
+        self._unavailable_until = time.monotonic() + cooldown
+
+    def warmup_async(self) -> None:
+        if not LOCAL_TTS_ENABLED:
+            return
+        with self._warmup_lock:
+            if self._warmup_thread is not None and self._warmup_thread.is_alive():
+                return
+            self._warmup_thread = threading.Thread(
+                target=self._warmup_worker,
+                name="bt-local-voice-warmup",
+                daemon=True,
+            )
+            self._warmup_thread.start()
+
+    def _warmup_worker(self) -> None:
+        try:
+            self.warmup()
+        except Exception:
+            LOG.exception("Не удалось прогреть локальный голос")
+
+    def warmup(self) -> bool:
+        """Поднимает сайдкар и заранее загружает модель и голосовой профиль."""
+        if not LOCAL_TTS_ENABLED:
+            return False
+        if not self._ensure_server():
+            return False
+        try:
+            with self._http_lock:
+                response = self._session.post(
+                    f"{LOCAL_TTS_URL}/warmup",
+                    timeout=(LOCAL_TTS_CONNECT_TIMEOUT, LOCAL_TTS_READ_TIMEOUT),
+                )
+            if response.status_code != 200:
+                LOG.warning(
+                    "Локальный голос: /warmup HTTP %s: %s",
+                    response.status_code,
+                    response.text[:300],
+                )
+                self._mark_failure(90.0)
+                return False
+            data = response.json()
+            if isinstance(data, dict):
+                self._health_data = data
+                self._last_probe = time.monotonic()
+            LOG.info("Локальный голос прогрет: %s", LOCAL_TTS_URL)
+            return True
+        except Exception as error:
+            LOG.warning("Локальный голос: прогрев не удался: %s", error)
+            self._mark_failure(90.0)
+            return False
+
+    def _ensure_server(self) -> bool:
+        if self._health(timeout=2.0) is not None:
+            return True
+        if not LOCAL_TTS_AUTOSTART:
+            return False
+        now = time.monotonic()
+        if now - self._last_start_attempt < 60.0:
+            return False
+        with self._start_lock:
+            if self._health(timeout=2.0) is not None:
+                return True
+            if time.monotonic() - self._last_start_attempt < 60.0:
+                return False
+            self._last_start_attempt = time.monotonic()
+            launcher = self._find_launcher()
+            if launcher is None:
+                LOG.info(
+                    "Локальный голос: сайдкар не найден, используется Edge TTS"
+                )
+                return False
+            command, workdir = launcher
+            LOG.info("Запускаю сайдкар голоса: %s", " ".join(command))
+            log_dir = BASE_DIR / "logs"
+            try:
+                log_dir.mkdir(parents=True, exist_ok=True)
+                environment = os.environ.copy()
+                environment["PYTHONIOENCODING"] = "utf-8"
+                environment["PYTHONUTF8"] = "1"
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                with (log_dir / "bt_voice_server.out").open("ab") as stream:
+                    self._process = subprocess.Popen(
+                        command,
+                        cwd=str(workdir),
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stream,
+                        stderr=subprocess.STDOUT,
+                        creationflags=creationflags,
+                    )
+            except Exception:
+                LOG.exception("Не удалось запустить сайдкар локального голоса")
+                return False
+            deadline = time.monotonic() + LOCAL_TTS_START_TIMEOUT
+            while time.monotonic() < deadline:
+                if self._health(timeout=1.0) is not None:
+                    LOG.info("Сайдкар локального голоса готов: %s", LOCAL_TTS_URL)
+                    return True
+                if self._process is not None and self._process.poll() is not None:
+                    LOG.warning(
+                        "Сайдкар локального голоса завершился с кодом %s. "
+                        "Журнал: logs\\bt_voice_server.out",
+                        self._process.returncode,
+                    )
+                    return False
+                time.sleep(0.5)
+            LOG.warning(
+                "Сайдкар локального голоса не ответил за %.0f секунд",
+                LOCAL_TTS_START_TIMEOUT,
+            )
+            return False
+
+    @staticmethod
+    def _find_launcher() -> tuple[list[str], Path] | None:
+        roots: list[Path] = []
+        seen: set[str] = set()
+
+        def add_root(path: Path) -> None:
+            resolved = str(path.resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                roots.append(path)
+
+        explicit_dir = os.environ.get("BT7274_LOCAL_TTS_DIR", "").strip()
+        if explicit_dir:
+            add_root(Path(explicit_dir))
+        explicit_server = os.environ.get("BT7274_LOCAL_TTS_SERVER", "").strip()
+        if explicit_server:
+            add_root(Path(explicit_server).parent)
+        add_root(BASE_DIR / "BT-VoiceLab")
+        add_root(BASE_DIR.parent / "BT-VoiceLab")
+        add_root(BASE_DIR / "BT7274_Voice")
+
+        explicit_python = os.environ.get("BT7274_LOCAL_TTS_PYTHON", "").strip()
+        for root in roots:
+            for exe_name in ("BT7274_Voice.exe", "voice_server.exe"):
+                server_exe = root / exe_name
+                if server_exe.exists():
+                    return [str(server_exe), "--port", str(LOCAL_TTS_PORT)], root
+            script = root / "voice_server.py"
+            if not script.exists():
+                continue
+            python_candidates: list[Path] = []
+            if explicit_python:
+                python_candidates.append(Path(explicit_python))
+            python_candidates.extend(
+                (
+                    root / ".venv" / "Scripts" / "python.exe",
+                    root / "venv" / "Scripts" / "python.exe",
+                    root / "python" / "python.exe",
+                    root / "runtime" / "python.exe",
+                    root / "python.exe",
+                )
+            )
+            for python in python_candidates:
+                if python.exists():
+                    return (
+                        [str(python), str(script), "--port", str(LOCAL_TTS_PORT)],
+                        root,
+                    )
+        return None
+
+    def synthesize(self, text: str) -> tuple[np.ndarray, int] | None:
+        """Синтезирует фразу локальным голосом или возвращает None."""
+        if not LOCAL_TTS_ENABLED:
+            return None
+        try:
+            max_new_tokens = max(160, min(900, int(len(text) * 6 + 96)))
+            with self._http_lock:
+                response = self._session.post(
+                    f"{LOCAL_TTS_URL}/tts",
+                    json={
+                        "text": text,
+                        "variant": LOCAL_TTS_VARIANT,
+                        "max_new_tokens": max_new_tokens,
+                    },
+                    timeout=(LOCAL_TTS_CONNECT_TIMEOUT, LOCAL_TTS_READ_TIMEOUT),
+                )
+        except Exception as error:
+            LOG.warning("Локальный голос недоступен: %s", error)
+            self._mark_failure(45.0)
+            return None
+        if response.status_code != 200:
+            LOG.warning(
+                "Локальный голос: /tts HTTP %s: %s",
+                response.status_code,
+                response.text[:300],
+            )
+            self._mark_failure(45.0)
+            return None
+        data = response.content
+        if len(data) < 2048:
+            LOG.warning("Локальный голос вернул пустой аудиопоток")
+            self._mark_failure(45.0)
+            return None
+        try:
+            loaded, sample_rate = sf.read(
+                io.BytesIO(data),
+                dtype="float32",
+                always_2d=False,
+            )
+            audio = np.asarray(loaded, dtype=np.float32)
+            if audio.ndim == 2:
+                audio = audio.mean(axis=1)
+            audio = audio.reshape(-1)
+            if audio.size == 0 or int(sample_rate) < 8000:
+                raise ValueError("пустой WAV")
+        except Exception:
+            LOG.exception("Не удалось декодировать WAV локального голоса")
+            self._mark_failure(45.0)
+            return None
+        cache_path = local_tts_cache_path(text)
+        try:
+            temporary = cache_path.with_suffix(".tmp")
+            temporary.write_bytes(data)
+            os.replace(temporary, cache_path)
+        except OSError:
+            LOG.exception("Не удалось сохранить кэш локального голоса")
+        meta: dict[str, Any] = {}
+        raw_meta = response.headers.get("X-BT-Voice-Meta")
+        if raw_meta:
+            try:
+                parsed = json.loads(raw_meta)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except ValueError:
+                pass
+        LOG.info(
+            "Локальный голос synth: %.2f с, RTF %s, кэш %s",
+            len(audio) / int(sample_rate),
+            meta.get("rtf", "?"),
+            meta.get("cached", False),
+        )
+        self._last_probe = time.monotonic()
+        return audio, int(sample_rate)
+
+    def shutdown(self) -> None:
+        """Выгружает модель и останавливает сайдкар, если его запустил сам БТ."""
+        if not LOCAL_TTS_ENABLED:
+            return
+        try:
+            with self._http_lock:
+                self._session.post(
+                    f"{LOCAL_TTS_URL}/unload",
+                    timeout=(1.0, 10.0),
+                )
+        except Exception:
+            pass
+        process = self._process
+        self._process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+
 class VoiceEngine:
     def __init__(self) -> None:
         TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self._proxy = os.environ.get(TTS_PROXY_ENV) or None
         self._lock = threading.Lock()
         self._unavailable_until = 0.0
+        self._local = LocalVoiceClient()
+        self._stop_requested = threading.Event()
+        self._last_activity = 0.0
+        self.level_callback: Callable[[float, str], None] | None = None
 
     def speak(self, text: str) -> None:
+        self._last_activity = time.monotonic()
         clean_text = clean_display_text(text)
         if not clean_text:
             return
-        if (
-            not voice_cached(clean_text)
-            and time.monotonic() < self._unavailable_until
-        ):
-            raise VoiceError(
-                "Edge TTS временно недоступен, ответ выведен текстом."
-            )
+        speech_text = prepare_text_for_tts(clean_text)
+        if not speech_text:
+            speech_text = clean_text
+        self._stop_requested.clear()
+        chunks = split_text_for_tts(speech_text, max_chars=170)
+        if not chunks:
+            return
         try:
             with self._lock:
-                audio, sample_rate = self._prepare_audio(clean_text)
+                self._speak_locked(clean_text, speech_text, chunks)
         except VoiceError:
             self._unavailable_until = time.monotonic() + TTS_UNAVAILABLE_COOLDOWN
             raise
         self._unavailable_until = 0.0
-        self._play(audio, sample_rate)
-        LOG.info("Голосовой канал завершён: %s", clean_text)
+        if not self._stop_requested.is_set():
+            LOG.info("Голосовой канал завершён: %s", clean_text)
+
+    def _speak_locked(self, clean_text: str, speech_text: str, chunks: list[str]) -> None:
+        # Сначала пробуем локальный голос (голос как в сэмпле).
+        if LOCAL_TTS_ENABLED:
+            first_local = self._prepare_local_audio(chunks[0])
+            if first_local is None:
+                # Одна попытка поднять/прогреть сайдкар, если он установлен.
+                if self._local._find_launcher() is not None:
+                    self._local.warmup()
+                    first_local = self._prepare_local_audio(chunks[0])
+            if first_local is not None:
+                self._play_local_chunks(chunks, first_local)
+                return
+            # Локальный голос включён, но недоступен — не смешиваем с Edge.
+            if self._local.status() is not None or self._local._find_launcher() is not None:
+                raise VoiceError(
+                    "Локальный голос БТ недоступен. Проверьте BT-VoiceLab/сайдкар, "
+                    "ответ выведен текстом."
+                )
+
+        # Fallback: Edge TTS (когда локальный сайдкар не установлен).
+        edge_audio = self._prepare_edge_audio(speech_text, chunks)
+        if edge_audio is None:
+            raise VoiceError("Голосовой канал недоступен, ответ выведен текстом.")
+        for index, (audio, sample_rate) in enumerate(edge_audio):
+            if self._stop_requested.is_set():
+                break
+            self._play(audio, sample_rate, stop_before=(index == 0))
+
+    def _play_local_chunks(
+        self,
+        chunks: list[str],
+        first_audio: tuple[np.ndarray, int],
+    ) -> None:
+        cache: dict[str, tuple[np.ndarray, int] | None] = {}
+        if chunks:
+            cache[chunks[0]] = first_audio
+
+        def prepare(chunk_text: str) -> tuple[np.ndarray, int] | None:
+            if chunk_text in cache:
+                return cache[chunk_text]
+            audio_data = self._prepare_local_audio(chunk_text)
+            if audio_data is None:
+                audio_data = self._prepare_local_audio(chunk_text)
+            cache[chunk_text] = audio_data
+            return audio_data
+
+        prefetch: concurrent.futures.Future[tuple[np.ndarray, int] | None] | None = None
+        prefetch_index = -1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="bt-tts-prefetch") as pool:
+            for index, chunk in enumerate(chunks):
+                if self._stop_requested.is_set():
+                    break
+                if prefetch is not None and prefetch_index == index:
+                    audio_data = prefetch.result()
+                    prefetch = None
+                else:
+                    audio_data = prepare(chunk)
+                if audio_data is None:
+                    LOG.warning("Локальный голос: пропущен чанк из-за сбоя синтеза: %s", chunk)
+                    continue
+
+                next_index = index + 1
+                if next_index < len(chunks) and not self._stop_requested.is_set():
+                    next_chunk = chunks[next_index]
+                    if next_chunk not in cache and prefetch is None:
+                        prefetch_index = next_index
+                        prefetch = pool.submit(prepare, next_chunk)
+
+                audio, sample_rate = audio_data
+                self._play(audio, sample_rate, stop_before=(index == 0))
+
+    def _prepare_edge_audio(
+        self,
+        clean_text: str,
+        chunks: list[str],
+    ) -> list[tuple[np.ndarray, int]] | None:
+        # Для Edge используем цельный текст, если он не слишком длинный, иначе чанки.
+        texts = [clean_text] if len(clean_text) <= 240 else chunks
+        prepared: list[tuple[np.ndarray, int]] = []
+        for text in texts:
+            if not voice_cached(text) and time.monotonic() < self._unavailable_until:
+                return None
+            prepared.append(self._prepare_audio(text))
+        return prepared
+
+    def _prepare_local_audio(self, clean_text: str) -> tuple[np.ndarray, int] | None:
+        cache_path = local_tts_cache_path(clean_text)
+        if cache_path.exists() and cache_path.stat().st_size > 2048:
+            cached = read_wav_file(cache_path)
+            if cached is not None:
+                LOG.info("Локальный голос взят из кэша: %s", cache_path.name)
+                return cached
+            try:
+                cache_path.unlink()
+            except OSError:
+                pass
+
+        if not LOCAL_TTS_ENABLED:
+            return None
+
+        health = self._local.status()
+        if health is None:
+            # Сайдкар ещё не запущен или в кулдауне после ошибки.
+            # Пробуем поднять/прогреть, чтобы голос был как в сэмпле.
+            if self._local._unavailable_until > time.monotonic():
+                return None
+            LOG.info("Локальный голос недоступен, пробую запустить сайдкар")
+            if not self._local.warmup():
+                return None
+            return self._local.synthesize(clean_text)
+
+        if not health.get("loaded"):
+            LOG.info("Локальный голос загружается, ожидаю готовность")
+            if not self._local.warmup():
+                return None
+
+        return self._local.synthesize(clean_text)
+
+    def warmup_local(self) -> bool:
+        """Загружает локальный голос; True, если он готов к работе."""
+        return self._local.warmup()
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        self.request_stop()
+        self._local.shutdown()
+
+    def prewarm_local_cache(self, texts: Iterable[str], limit: int = 4) -> None:
+        """Фоново прогревает локальный голос на частых коротких фразах."""
+        if not LOCAL_TTS_ENABLED:
+            return
+        unique: list[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            speech_text = prepare_text_for_tts(text)
+            if not speech_text or speech_text in seen:
+                continue
+            seen.add(speech_text)
+            unique.append(speech_text)
+            if len(unique) >= limit:
+                break
+        generated = 0
+        for speech_text in unique:
+            if time.monotonic() - self._last_activity < 8.0:
+                LOG.info("Локальный голос: прогрев остановлен, пилот уже говорит")
+                break
+            if local_voice_cached(speech_text):
+                continue
+            audio = self._local.synthesize(speech_text)
+            if audio is not None:
+                generated += 1
+        if generated:
+            LOG.info("Локальный голос: прогрето фраз %s", generated)
 
     def prewarm(self, texts: Iterable[str]) -> None:
         """Заранее синтезирует частые фразы, чтобы ответы звучали сразу."""
@@ -2444,8 +3257,7 @@ class VoiceEngine:
             "или прокси BT7274_TTS_PROXY."
         ) from last_error
 
-    @staticmethod
-    def _play(audio: np.ndarray, sample_rate: int) -> None:
+    def _play(self, audio: np.ndarray, sample_rate: int, *, stop_before: bool = True) -> None:
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
         if samples.size == 0:
             return
@@ -2461,9 +3273,46 @@ class VoiceEngine:
             if target_rate != sample_rate:
                 samples = resample_audio(samples, sample_rate, target_rate)
             samples = np.ascontiguousarray(np.clip(samples, -0.98, 0.98), dtype=np.float32)
-            sd.stop()
-            sd.play(samples, target_rate, blocking=True)
-            sd.wait()
+            if stop_before:
+                sd.stop()
+            level_callback = self.level_callback
+            if level_callback is None:
+                sd.play(samples, target_rate, blocking=True)
+                sd.wait()
+                return
+            # Потокобезопасно отдаём реальную громкость для эквалайзера HUD.
+            sd.play(samples, target_rate, blocking=False)
+            total_seconds = samples.size / float(max(1, target_rate))
+            started_at = time.monotonic()
+            window = max(1, int(target_rate * 0.030))
+            next_emit = 0.0
+            try:
+                while True:
+                    elapsed = time.monotonic() - started_at
+                    if elapsed >= total_seconds:
+                        break
+                    if elapsed >= next_emit:
+                        center = min(samples.size - 1, int(elapsed * target_rate))
+                        lo = max(0, center - window)
+                        hi = min(samples.size, center + window)
+                        if hi > lo:
+                            block = samples[lo:hi]
+                            rms = float(np.sqrt(np.mean(np.square(block))))
+                            level = min(1.0, max(0.0, (rms / 0.30) ** 0.7))
+                        else:
+                            level = 0.0
+                        try:
+                            level_callback(level, "speaking")
+                        except Exception:
+                            LOG.debug("Сбой колбэка уровня голоса", exc_info=True)
+                        next_emit = elapsed + 1.0 / 40.0
+                    time.sleep(0.006)
+                sd.wait()
+            finally:
+                try:
+                    level_callback(0.0, "idle")
+                except Exception:
+                    pass
         except Exception as error:
             try:
                 sd.stop()
@@ -2482,6 +3331,7 @@ class BTSignals(QObject):
     session_finished = Signal()
     action_done = Signal(str, str)
     timer_requested = Signal(int, str, str)
+    voice_level = Signal(float, str)
 
 
 class HelmetWidget(QWidget):
@@ -2518,10 +3368,30 @@ class HelmetWidget(QWidget):
         self._next_slice_at = 0.0
         self._frame = 0
         self._target_opacity = 1.0
+        # Equalizer / CRT appearance
+        self._eq_mode = "idle"  # idle | speaking | listening
+        self._eq_level = 0.0
+        self._eq_level_target = 0.0
+        self._eq_bars = [0.08] * 13
+        self._eq_bar_targets = [0.08] * 13
+        self._eq_until = 0.0
+        self._appearance = 1.0  # 0..1
+        self._appearance_target = 1.0
+        self._appear_duration = 0.26
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(OVERLAY_FRAME_MS)
         self._timer.timeout.connect(self._tick)
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        if not self._timer.isActive():
+            self._last_tick = time.monotonic()
+            self._timer.start()
+
+    def hideEvent(self, event: Any) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
 
     @staticmethod
     def _build_scanlines() -> QPixmap:
@@ -2559,9 +3429,12 @@ class HelmetWidget(QWidget):
         return tiles
 
     def set_glitch(self, enabled: bool) -> None:
+        now = time.monotonic()
         if enabled:
             self._glitch = True
-            now = time.monotonic()
+            if self._appearance < 0.02 or not self.isVisible():
+                self._appearance = 0.0
+            self._appearance_target = 1.0
             if not self._timer.isActive():
                 self._phase = 0.0
                 self._last_tick = now
@@ -2570,25 +3443,51 @@ class HelmetWidget(QWidget):
                 self._timer.start()
             self.update()
             return
+        # reverse CRT close
         self._glitch = False
-        self._timer.stop()
-        self._opacity = 1.0
-        self._wave_strength = 0.0
         self._wave_target = 0.0
+        self._eq_mode = "idle"
+        self._eq_level_target = 0.0
+        self._eq_until = 0.0
+        self._appearance_target = 0.0
         self._slice = False
         self._target_opacity = 1.0
+        if not self._timer.isActive():
+            self._last_tick = now
+            self._timer.start()
         self.update()
 
     def start_wave(self, strength: float = 1.0, duration: float = 3.2) -> None:
-        """Запускает волну по карточке; используется во время ответа БТ."""
+        """Запускает волну/эквалайзер по карточке; используется во время ответа БТ."""
         now = time.monotonic()
         self._wave_target = max(0.0, min(1.4, float(strength)))
         self._wave_until = now + max(0.2, float(duration))
+        self._eq_mode = "speaking"
+        self._eq_level_target = max(0.15, min(1.0, float(strength) * 0.7))
+        self._eq_until = max(self._eq_until, now + 0.8)
         if not self._timer.isActive():
             self._phase = 0.0
             self._last_tick = now
             self._next_slice_at = now + 0.12
             self._timer.start()
+
+    def set_audio_level(self, level: float, mode: str = "speaking") -> None:
+        """Уровень 0..1 для эквалайзера (TTS/mic)."""
+        now = time.monotonic()
+        self._eq_mode = mode if mode in {"idle", "speaking", "listening"} else "speaking"
+        self._eq_level_target = max(0.0, min(1.0, float(level)))
+        if self._eq_mode == "idle":
+            self._eq_until = 0.0
+        else:
+            self._eq_until = now + 0.6
+        if not self._timer.isActive():
+            self._last_tick = now
+            self._timer.start()
+
+    def set_idle_mode(self) -> None:
+        self._eq_mode = "idle"
+        self._eq_level_target = 0.0
+        self._eq_until = 0.0
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -2601,9 +3500,37 @@ class HelmetWidget(QWidget):
 
         if now >= self._wave_until:
             self._wave_target = 0.0
+        if self._eq_mode in {"speaking", "listening"} and now >= self._eq_until:
+            self._eq_mode = "idle"
+            self._eq_level_target = 0.0
         self._wave_strength += (self._wave_target - self._wave_strength) * min(
             1.0, delta * 7.0
         )
+
+        # Equalizer: 13 баров, нижняя привязка, «колокол» как в HUD Titanfall.
+        self._eq_level += (self._eq_level_target - self._eq_level) * min(1.0, delta * 14.0)
+        bell = [0.30, 0.40, 0.52, 0.66, 0.80, 0.92, 1.00, 0.92, 0.80, 0.66, 0.52, 0.40, 0.30]
+        for i in range(13):
+            if self._eq_mode == "idle":
+                target = 0.045 + 0.018 * math.sin(self._phase * 1.9 + i * 0.5)
+            elif self._eq_mode == "listening":
+                wobble = 0.82 + 0.18 * math.sin(self._phase * 3.2 + i * 0.55)
+                target = (0.06 + 0.94 * self._eq_level) * (0.55 + 0.45 * bell[i]) * wobble
+            else:  # speaking
+                wobble = 0.80 + 0.20 * math.sin(self._phase * 11.0 + i * 0.85)
+                wobble *= 0.92 + 0.08 * math.sin(self._phase * 23.0 - i * 1.4)
+                target = (0.05 + 0.95 * self._eq_level) * bell[i] * wobble
+            target = max(0.03, min(1.0, target))
+            self._eq_bar_targets[i] = target
+            speed = 20.0 if self._eq_mode != "idle" else 4.0
+            self._eq_bars[i] += (target - self._eq_bars[i]) * min(1.0, delta * speed)
+
+        # CRT appearance: линейное раскрытие ~260 мс.
+        step = delta / max(0.05, self._appear_duration)
+        if self._appearance < self._appearance_target:
+            self._appearance = min(self._appearance_target, self._appearance + step)
+        elif self._appearance > self._appearance_target:
+            self._appearance = max(self._appearance_target, self._appearance - step)
 
         if self._glitch:
             if self._frame % 3 == 0:
@@ -2628,13 +3555,6 @@ class HelmetWidget(QWidget):
             self._slice = False
             self._opacity = 1.0
 
-        if (
-            not self._glitch
-            and self._wave_target <= 0.0
-            and self._wave_strength < 0.01
-        ):
-            self._timer.stop()
-            self._wave_strength = 0.0
         self.update()
 
     def paintEvent(self, event: Any) -> None:
@@ -2654,22 +3574,40 @@ class HelmetWidget(QWidget):
             float(OVERLAY_CARD_WIDTH),
             float(OVERLAY_CARD_HEIGHT),
         )
+        appear = max(0.0, min(1.0, self._appearance))
         halo = QRadialGradient(card.center(), 210.0)
-        halo.setColorAt(0.0, QColor(0, 225, 255, 62))
-        halo.setColorAt(0.55, QColor(0, 170, 230, 24))
+        halo.setColorAt(0.0, QColor(0, 225, 255, int(62 * appear)))
+        halo.setColorAt(0.55, QColor(0, 170, 230, int(24 * appear)))
         halo.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(halo)
         painter.fillRect(self.rect(), halo)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        painter.save()
-        painter.setClipRect(card)
-        if self._wave_strength > 0.015:
-            self._paint_wave(painter, card)
+        # CRT appearance: точка/линия -> расходятся верх и низ.
+        if appear < 0.35:
+            open_w = card.width() * (appear / 0.35)
+            reveal = QRectF(
+                card.center().x() - open_w / 2.0,
+                card.center().y() - 1.5,
+                open_w,
+                3.0,
+            )
+        elif appear < 0.999:
+            open_h = max(3.0, card.height() * ((appear - 0.35) / 0.65))
+            reveal = QRectF(
+                card.left(),
+                card.center().y() - open_h / 2.0,
+                card.width(),
+                open_h,
+            )
         else:
-            painter.setOpacity(self._opacity)
-            painter.drawPixmap(card, self._base, QRectF(self._base.rect()))
+            reveal = card
+
+        painter.save()
+        painter.setClipRect(reveal)
+        painter.setOpacity(self._opacity)
+        painter.drawPixmap(card, self._base, QRectF(self._base.rect()))
 
         painter.setOpacity(0.7)
         painter.drawPixmap(
@@ -2677,6 +3615,9 @@ class HelmetWidget(QWidget):
             self._scanlines,
             QRectF(self._scanlines.rect()),
         )
+
+        if appear >= 0.35:
+            self._paint_equalizer(painter, card, appear)
 
         if self._glitch and self._slice:
             painter.setOpacity(0.72)
@@ -2718,81 +3659,62 @@ class HelmetWidget(QWidget):
 
         painter.restore()
 
+        # Яркие края CRT: две горизонтальные линии расходятся вверх/вниз.
+        if appear < 0.999:
+            fade = 1.0 - max(0.0, min(1.0, (appear - 0.80) / 0.20))
+            core = int(245 * fade)
+            glow = int(110 * fade)
+            if core > 0:
+                for edge_y in (reveal.top(), reveal.bottom()):
+                    painter.setPen(QPen(QColor(120, 240, 255, glow), 5.0))
+                    painter.drawLine(
+                        QPointF(reveal.left(), edge_y),
+                        QPointF(reveal.right(), edge_y),
+                    )
+                    painter.setPen(QPen(QColor(245, 255, 255, core), 1.6))
+                    painter.drawLine(
+                        QPointF(reveal.left(), edge_y),
+                        QPointF(reveal.right(), edge_y),
+                    )
+                painter.setPen(QPen(QColor(200, 255, 255, int(core * 0.55)), 1.0))
+                painter.drawLine(
+                    QPointF(card.center().x(), reveal.top()),
+                    QPointF(card.center().x(), reveal.bottom()),
+                )
+
         if self._glitch:
             self._paint_lock_brackets(painter, card)
 
         painter.end()
 
-    def _paint_wave(self, painter: QPainter, card: QRectF) -> None:
-        """Волновая деформация карточки во время ответа БТ."""
-        strength = max(0.0, min(1.25, self._wave_strength))
-        phase = self._phase
-        painter.setOpacity(self._opacity)
-        painter.drawPixmap(card, self._base, QRectF(self._base.rect()))
-
-        strips = 16
-        strip_height = card.height() / strips
-        for index in range(strips):
-            source_y = index * strip_height
-            offset = math.sin(index * 0.72 + phase * 4.4) * (2.2 + 3.8 * strength)
-            offset += math.sin(index * 0.21 - phase * 2.1) * 1.6 * strength
-            target = QRectF(
-                card.left() + offset,
-                card.top() + source_y,
-                card.width(),
-                strip_height + 0.75,
-            )
-            source = QRectF(
-                0.0,
-                source_y,
-                float(self._base.width()),
-                strip_height,
-            )
-            painter.setOpacity(
-                max(
-                    0.0,
-                    min(
-                        1.0,
-                        0.42
-                        + 0.34 * strength
-                        + 0.12 * math.sin(index * 0.9 + phase * 5.0),
-                    ),
-                )
-            )
-            painter.drawPixmap(target, self._base, source)
-
-        painter.setOpacity(1.0)
-        for line_index in range(3):
-            path = QPainterPath()
-            base_y = card.top() + card.height() * (0.3 + 0.2 * line_index)
-            for x in range(0, OVERLAY_CARD_WIDTH + 1, 4):
-                y = base_y + math.sin(
-                    x * 0.032 + phase * 4.2 + line_index * 1.7
-                ) * (3.5 + 2.5 * strength)
-                if x == 0:
-                    path.moveTo(card.left() + x, y)
-                else:
-                    path.lineTo(card.left() + x, y)
-            alpha = int(
-                max(
-                    0.0,
-                    min(
-                        255.0,
-                        (30.0 + 40.0 * strength)
-                        * (0.7 + 0.3 * math.sin(phase * 3.0 + line_index)),
-                    ),
-                )
-            )
-            painter.setPen(QPen(QColor(0, 240, 255, alpha), 1.0))
-            painter.drawPath(path)
-
-        pulse = (phase * 0.55) % 1.0
-        radius = 14.0 + pulse * (72.0 + 24.0 * strength)
-        ring_alpha = int(max(0.0, 1.0 - pulse) * 70.0 * strength)
-        if ring_alpha > 0:
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(0, 240, 255, ring_alpha), 1.5))
-            painter.drawEllipse(card.center(), radius, radius)
+    def _paint_equalizer(self, painter: QPainter, card: QRectF, appear: float = 1.0) -> None:
+        """13 баров в левой панели карточки, как в HUD Titanfall 2."""
+        n = 13
+        bar_w = 2.4
+        gap = 1.0
+        total_w = n * bar_w + (n - 1) * gap
+        # Левая панель helmet.webp: внутренняя область ~x 9..55, низ ~124 (в 256x144).
+        panel_center = card.left() + card.width() * (32.0 / 256.0)
+        x0 = panel_center - total_w / 2.0
+        base_y = card.top() + card.height() * (124.0 / 144.0)
+        min_h = 2.5
+        max_h = card.height() * (58.0 / 144.0)
+        alpha = int(150 + 105 * max(0.0, min(1.0, (appear - 0.35) / 0.65)))
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i in range(n):
+            level = max(0.0, min(1.0, self._eq_bars[i]))
+            h = min_h + max_h * level
+            x = x0 + i * (bar_w + gap)
+            y = base_y - h
+            rect = QRectF(x, y, bar_w, h)
+            glow = QColor(180, 250, 255, max(0, min(255, int(alpha * 0.22))))
+            painter.setBrush(glow)
+            painter.drawRoundedRect(rect.adjusted(-0.8, -0.8, 0.8, 0.8), 1.2, 1.2)
+            color = QColor(246, 254, 255, max(0, min(255, alpha)))
+            painter.setBrush(color)
+            painter.drawRoundedRect(rect, 0.6, 0.6)
+        painter.restore()
 
     def _paint_noise(self, painter: QPainter, card: QRectF) -> None:
         if not self._noise_tiles or self._frame % 3:
@@ -3085,6 +4007,7 @@ class GlitchOverlay(QWidget):
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade.setDuration(190)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._show_token = 0
         self.setWindowOpacity(1.0)
         self._place_window()
 
@@ -3138,12 +4061,14 @@ class GlitchOverlay(QWidget):
 
     def _present(self) -> None:
         self._place_window()
+        self._show_token += 1
+        self._fade.stop()
         if not self.isVisible():
             self.setWindowOpacity(1.0)
             self.show()
             self.raise_()
             self.setWindowOpacity(0.0)
-            self._fade.stop()
+            self._fade.setDuration(190)
             self._fade.setStartValue(0.0)
             self._fade.setEndValue(1.0)
             self._fade.start()
@@ -3212,20 +4137,23 @@ class GlitchOverlay(QWidget):
         except Exception:
             LOG.exception("Не удалось применить Win32-стили оверлея")
 
+    def set_eq_level(self, level: float, mode: str = "speaking") -> None:
+        if self.isVisible():
+            self._helmet.set_audio_level(level, mode)
+
     def show_listening(self, text: str) -> None:
         self._subtitle.set_text(text)
         self._set_state("СЛУШАЮ", QColor(0, 232, 255))
         self._helmet.set_glitch(True)
-        self._helmet.start_wave(0.35, 1.4)
+        self._helmet.set_audio_level(0.0, "listening")
         self._present()
 
     def show_response(self, text: str) -> None:
         self._subtitle.set_text(text)
         self._set_state("ОТВЕТ", QColor(0, 232, 255))
         self._helmet.set_glitch(True)
-        self._helmet.start_wave(1.0, 3.2)
-        if not self.isVisible():
-            self._present()
+        self._helmet.start_wave(0.8, 4.0)
+        self._present()
 
     def set_status(self, text: str) -> None:
         self._subtitle.set_text(text)
@@ -3242,11 +4170,240 @@ class GlitchOverlay(QWidget):
             self._set_state("СИСТЕМА", QColor(0, 232, 255))
 
     def finish_and_hide(self) -> None:
-        self._fade.stop()
-        self._helmet.set_glitch(False)
         self._set_state("ОЖИДАНИЕ", QColor(90, 112, 136))
-        self.hide()
+        self._helmet.set_glitch(False)
+        if not self.isVisible():
+            self._helmet.set_idle_mode()
+            return
+        self._show_token += 1
+        token = self._show_token
+        self._fade.stop()
+        self._fade.setDuration(170)
+        self._fade.setStartValue(max(0.0, self.windowOpacity()))
+        self._fade.setEndValue(0.0)
+        self._fade.start()
+        QTimer.singleShot(300, lambda: self._finish_hide(token))
+
+    def _finish_hide(self, token: int) -> None:
+        if token != self._show_token:
+            return
+        if self.isVisible():
+            self.hide()
         self.setWindowOpacity(1.0)
+        self._helmet.set_idle_mode()
+
+
+class UserToolManager:
+    """Пользовательские инструменты из data/user_tools.json."""
+
+    SAFE_TYPES = {"open_url", "open_path", "open_app", "hotkey", "insert_text", "copy_text"}
+
+    def __init__(self) -> None:
+        self._tools: list[dict[str, Any]] = []
+        self._mtime: float | None = None
+        self._pending: dict[str, Any] | None = None
+        self._pending_until = 0.0
+        self.reload()
+
+    @property
+    def path(self) -> Path:
+        return USER_TOOLS_PATH
+
+    def reload(self) -> list[dict[str, Any]]:
+        path = self.path
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            self._tools = []
+            self._mtime = None
+            return self._tools
+        if self._mtime == mtime:
+            return self._tools
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            LOG.exception("Не удалось прочитать user_tools.json")
+            self._tools = []
+            self._mtime = mtime
+            return self._tools
+        raw_tools = data.get("tools", []) if isinstance(data, dict) else data
+        if not isinstance(raw_tools, list):
+            raw_tools = []
+        tools: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_tools):
+            if not isinstance(item, dict):
+                continue
+            tool = self._normalize_tool(item, index)
+            if tool:
+                tools.append(tool)
+        self._tools = tools
+        self._mtime = mtime
+        LOG.info("Загружено пользовательских инструментов: %s", len(tools))
+        return self._tools
+
+    def _normalize_tool(self, item: dict[str, Any], index: int) -> dict[str, Any] | None:
+        action = item.get("action")
+        if not isinstance(action, dict):
+            return None
+        action_type = str(action.get("type") or "").strip().lower()
+        if action_type not in self.SAFE_TYPES:
+            return None
+        name = clean_display_text(str(item.get("name") or f"Инструмент {index + 1}"))
+        tool_id = str(item.get("id") or f"tool_{index + 1}").strip() or f"tool_{index + 1}"
+        triggers = item.get("triggers", [])
+        if isinstance(triggers, str):
+            triggers = [triggers]
+        clean_triggers = []
+        for trigger in triggers if isinstance(triggers, list) else []:
+            text = re.sub(r"\s+", " ", str(trigger or "")).strip().lower()
+            if text:
+                clean_triggers.append(text)
+        enabled = bool(item.get("enabled", True))
+        confirm = item.get("confirm")
+        if not isinstance(confirm, bool):
+            confirm = action_type in {"open_path", "open_app"}
+        response = clean_display_text(str(item.get("response") or ""))
+        description = clean_display_text(str(item.get("description") or ""))
+        return {
+            "id": tool_id,
+            "name": name,
+            "enabled": enabled,
+            "triggers": clean_triggers,
+            "match": str(item.get("match") or "contains").strip().lower(),
+            "confirm": confirm,
+            "response": response,
+            "description": description,
+            "action": action,
+        }
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        self.reload()
+        return [tool for tool in self._tools if tool.get("enabled", True)]
+
+    def pending(self) -> dict[str, Any] | None:
+        if self._pending and time.monotonic() > self._pending_until:
+            self._pending = None
+        return self._pending
+
+    def clear_pending(self) -> None:
+        self._pending = None
+        self._pending_until = 0.0
+
+    def _match_tool(self, command: str) -> dict[str, Any] | None:
+        text = re.sub(r"\s+", " ", (command or "")).strip().lower()
+        if not text:
+            return None
+        for tool in self.list_tools():
+            mode = tool.get("match", "contains")
+            for trigger in tool.get("triggers", []):
+                if not trigger:
+                    continue
+                if mode == "exact" and text == trigger:
+                    return tool
+                if mode == "regex":
+                    try:
+                        if re.search(trigger, text, re.IGNORECASE):
+                            return tool
+                    except re.error:
+                        continue
+                if mode != "regex" and trigger in text:
+                    return tool
+        return None
+
+    def handle(self, command: str) -> tuple[bool, str]:
+        self.reload()
+        text = re.sub(r"\s+", " ", (command or "")).strip().lower()
+        if not text:
+            return False, ""
+
+        pending = self.pending()
+        if pending:
+            if re.search(r"\b(подтверди|подтверждаю|выполняй|да,\s*выполняй|да\s+выполняй)\b", text):
+                tool = pending
+                self.clear_pending()
+                return True, self._execute(tool)
+            if re.search(r"\b(отмена|отмени|не\s+надо|стоп)\b", text):
+                self.clear_pending()
+                return True, "Действие отменено, пилот."
+            # Если сказали другой инструмент - сбрасываем ожидание и продолжаем поиск.
+
+        tool = self._match_tool(command)
+        if tool is None:
+            return False, ""
+        if tool.get("confirm"):
+            self._pending = tool
+            self._pending_until = time.monotonic() + 30.0
+            name = tool.get("name") or "инструмент"
+            return True, f"Требуется подтверждение для инструмента «{name}». Скажите: «подтверждаю» или «отмена»."
+        return True, self._execute(tool)
+
+    def _execute(self, tool: dict[str, Any]) -> str:
+        action = tool.get("action", {})
+        action_type = str(action.get("type") or "").strip().lower()
+        name = tool.get("name") or "Инструмент"
+        try:
+            if action_type == "open_url":
+                url = str(action.get("url") or "").strip()
+                if not url:
+                    return f"Инструмент «{name}»: URL не задан."
+                if not re.match(r"^https?://", url, re.IGNORECASE):
+                    return f"Инструмент «{name}»: разрешены только http/https URL."
+                ok, warning = preferences.launch_url(url)
+                if not ok:
+                    return warning or f"Не удалось открыть URL: {name}."
+                return tool.get("response") or f"Открываю {name}, пилот."
+            if action_type == "open_path":
+                raw = str(action.get("path") or "").strip()
+                if not raw:
+                    return f"Инструмент «{name}»: путь не задан."
+                path = Path(os.path.expandvars(os.path.expanduser(raw)))
+                if not path.is_absolute():
+                    path = (BASE_DIR / path).resolve()
+                os.startfile(str(path))
+                return tool.get("response") or f"Открываю {name}, пилот."
+            if action_type == "open_app":
+                raw = str(action.get("path") or "").strip()
+                if not raw:
+                    return f"Инструмент «{name}»: путь к приложению не задан."
+                path = Path(os.path.expandvars(os.path.expanduser(raw)))
+                if not path.is_absolute():
+                    path = (BASE_DIR / path).resolve()
+                if path.suffix.lower() not in {".exe", ".lnk", ".url", ".bat", ".cmd"}:
+                    return f"Инструмент «{name}»: разрешены .exe/.lnk/.url/.bat/.cmd."
+                if not path.exists():
+                    return f"Инструмент «{name}»: файл не найден."
+                args = action.get("args", [])
+                if not isinstance(args, list):
+                    args = []
+                if path.suffix.lower() == ".exe":
+                    cmd = [str(path)] + [str(a) for a in args]
+                    subprocess.Popen(cmd, shell=False, cwd=str(path.parent))
+                else:
+                    os.startfile(str(path))
+                return tool.get("response") or f"Запускаю {name}, пилот."
+            if action_type == "hotkey":
+                keys = str(action.get("keys") or "").strip()
+                if not keys:
+                    return f"Инструмент «{name}»: горячие клавиши не заданы."
+                keyboard.send(keys)
+                return tool.get("response") or f"Комбинация {keys} отправлена, пилот."
+            if action_type == "insert_text":
+                text = str(action.get("text") or "")
+                if not text:
+                    return f"Инструмент «{name}»: текст не задан."
+                pyperclip.copy(text)
+                keyboard.send("ctrl+v")
+                return tool.get("response") or f"Текст вставлен, пилот."
+            if action_type == "copy_text":
+                text = str(action.get("text") or "")
+                if not text:
+                    return f"Инструмент «{name}»: текст не задан."
+                pyperclip.copy(text)
+                return tool.get("response") or f"Скопировано, пилот."
+        except Exception as error:
+            LOG.exception("Ошибка пользовательского инструмента %s", name)
+            return f"Ошибка инструмента «{name}»: {error}"
+        return f"Инструмент «{name}»: неподдерживаемый тип."
 
 
 class ActionExecutor:
@@ -3515,6 +4672,7 @@ class BT7274Controller(QObject):
         self._brain = OllamaBrain()
         self._voice = VoiceEngine()
         self._actions = ActionExecutor(self._signals)
+        self._user_tools = UserToolManager()
         self._state = AgentState.IDLE
         self._closing = False
         self._recording = False
@@ -3543,6 +4701,13 @@ class BT7274Controller(QObject):
         self._signals.session_finished.connect(self._on_session_finished)
         self._signals.action_done.connect(self._on_action_done)
         self._signals.timer_requested.connect(self._on_timer_requested)
+        self._signals.voice_level.connect(self._on_voice_level)
+        self._voice.level_callback = (
+            lambda level, mode: self._signals.voice_level.emit(level, mode)
+        )
+        self._recorder.level_callback = (
+            lambda level: self._signals.voice_level.emit(level, "listening")
+        )
         self._setup_tray()
         self._install_hotkeys()
 
@@ -3597,17 +4762,33 @@ class BT7274Controller(QObject):
         self._whisper.preload()
         if self._closing:
             return
-        self._voice.prewarm(self._prewarm_phrases())
+        local_voice_ready = False
+        try:
+            local_voice_ready = self._voice.warmup_local()
+        except Exception:
+            LOG.exception("Не удалось подготовить локальный голос")
+            local_voice_ready = False
+        if self._closing:
+            return
+        if local_voice_ready:
+            LOG.info("Локальный голос готов, прогреваю кэш частых фраз")
+            try:
+                self._voice.prewarm_local_cache(self._prewarm_phrases(), limit=4)
+            except Exception:
+                LOG.exception("Не удалось прогреть локальный кэш фраз")
+        else:
+            self._voice.prewarm(self._prewarm_phrases())
         if not self._closing:
             LOG.info("Фоновый прогрев нейроядер завершён")
 
     @staticmethod
     def _prewarm_phrases() -> list[str]:
-        phrases = [
+        phrases = ["Воспроизведение переключено, пилот."]
+        phrases.extend(
             response
             for tag, response in DEFAULT_ACTION_RESPONSES.items()
             if tag not in {"VOLUME_UP", "VOLUME_DOWN"}
-        ]
+        )
         phrases.extend(
             (
                 "Запись уже идёт, пилот. Ожидаю команду стоп.",
@@ -3843,6 +5024,7 @@ class BT7274Controller(QObject):
         self._record_timeout.stop()
         self._recording = False
         self._state = AgentState.THINKING
+        self._signals.voice_level.emit(0.0, "idle")
         LOG.info("Состояние: THINKING")
         self._overlay.set_status("ДЕШИФРУЮ ПРИКАЗ...")
         self._refresh_tray_listen_action()
@@ -3902,15 +5084,20 @@ class BT7274Controller(QObject):
             if fixed_response:
                 LOG.info("Быстрый диалоговый ответ: %s", fixed_response)
                 self._signals.subtitle.emit(fixed_response)
+                self._brain.remember_turn(command, fixed_response)
                 self._speak_response(fixed_response)
                 return
+            previous_response = self._last_response
             if self._handle_local_command(command):
+                if self._last_response and self._last_response != previous_response:
+                    self._brain.remember_turn(command, self._last_response)
                 return
             hinted_action = infer_action_from_command(command)
             if hinted_action in RECORD_TAGS:
                 response = self._run_recording_tag(hinted_action)
                 LOG.info("Запись OBS: действие=%s, ответ=%s", hinted_action, response)
                 self._signals.subtitle.emit(response)
+                self._brain.remember_turn(command, response)
                 self._speak_response(response)
                 return
             if hinted_action:
@@ -3925,6 +5112,7 @@ class BT7274Controller(QObject):
                     self._actions.submit([hinted_action], command)
                 except Exception:
                     LOG.exception("Не удалось запустить исполнитель действий")
+                self._brain.remember_turn(command, response)
                 self._speak_response(response)
                 return
             self._signals.status.emit("ЗАПРОС К ДАТА-ЯДРУ...")
@@ -3981,10 +5169,8 @@ class BT7274Controller(QObject):
 
         if LOCAL_CANCEL_RE.match(lowered):
             LOG.info("Локально: отмена речи")
-            try:
-                sd.stop()
-            except Exception:
-                pass
+            self._voice.request_stop()
+            self._user_tools.clear_pending()
             self._last_response = "Приказ отменён, пилот."
             self._last_voice_ok = True
             self._signals.subtitle.emit(self._last_response)
@@ -4148,6 +5334,22 @@ class BT7274Controller(QObject):
             self._emit_response(response)
             return True
 
+        if re.search(r"\b(пользовательск\w*\s+инструмент|мои\s+инструмент|список\s+инструмент)\w*\b", lowered):
+            tools = self._user_tools.list_tools()
+            if not tools:
+                self._emit_response("Пользовательских инструментов нет, пилот. Добавьте их в data\\user_tools.json.")
+                return True
+            names = [str(t.get("name") or t.get("id") or "инструмент") for t in tools[:8]]
+            more = f" и ещё {len(tools) - 8}" if len(tools) > 8 else ""
+            self._emit_response("Инструменты: " + ", ".join(names) + more + ".")
+            return True
+
+        handled, response = self._user_tools.handle(text)
+        if handled:
+            LOG.info("Локально: пользовательский инструмент: %s", response)
+            self._emit_response(response)
+            return True
+
         return False
 
     def _handle_web_search(self, command: str) -> bool:
@@ -4221,11 +5423,32 @@ class BT7274Controller(QObject):
             return DEFAULT_ACTION_RESPONSES["RECORD_VIDEO_STOP"]
         return ""
 
+    @staticmethod
+    def _speech_text(response: str, limit: int = 1500) -> str:
+        text = clean_display_text(response)
+        if len(text) <= limit:
+            return text
+        parts = re.split(r"(?<=[.!?…])\s+", text)
+        short = ""
+        for part in parts:
+            candidate = f"{short} {part}".strip() if short else part.strip()
+            if not candidate:
+                continue
+            if len(candidate) <= limit:
+                short = candidate
+            elif not short:
+                short = candidate[:limit].rsplit(" ", 1)[0].rstrip(" ,;:") + "."
+                break
+            else:
+                break
+        return short or text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:") + "."
+
     def _speak_response(self, response: str) -> None:
         self._last_response = response
         append_chat_history("БТ", response)
+        speech = self._speech_text(response)
         try:
-            self._voice.speak(response)
+            self._voice.speak(speech)
             self._last_voice_ok = True
         except Exception:
             LOG.exception("Голосовой канал недоступен, ответ остаётся текстом")
@@ -4236,11 +5459,20 @@ class BT7274Controller(QObject):
         self._last_voice_ok = False
         self._signals.subtitle.emit(message)
 
+    def _on_voice_level(self, level: float, mode: str) -> None:
+        if self._closing:
+            return
+        if mode == "listening" and self._state != AgentState.LISTENING:
+            return
+        self._overlay.set_eq_level(level, mode)
+
     def _on_status(self, text: str) -> None:
         if self._closing:
             return
         if self._overlay.isVisible():
             self._overlay.set_status(text)
+            if self._state not in (AgentState.LISTENING, AgentState.SPEAKING):
+                self._overlay.set_eq_level(0.0, "idle")
 
     def _on_subtitle(self, text: str) -> None:
         if self._closing:
@@ -4372,6 +5604,10 @@ class BT7274Controller(QObject):
             self._brain.unload()
         except Exception:
             LOG.exception("Не удалось выгрузить Ollama при выключении")
+        try:
+            self._voice.shutdown()
+        except Exception:
+            LOG.exception("Не удалось остановить локальный голос при выключении")
         if self._tray is not None:
             self._tray.hide()
         self._overlay.finish_and_hide()
