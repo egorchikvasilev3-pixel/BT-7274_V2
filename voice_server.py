@@ -50,17 +50,17 @@ PIPER_MODEL = Path(
 )
 REF_AUDIO = ROOT / "reference" / "bt_ru_reference_7s.wav"
 REF_META = ROOT / "reference" / "bt_ru_reference_7s.json"
-CACHE_DIR = ROOT / "voice_cache"
-LOG_PATH = ROOT / "voice_server.log"
+CACHE_DIR = APP_DIR / "voice_cache"
+LOG_PATH = APP_DIR / "voice_server.log"
 
 _default_engine = "piper" if (PIPER_DIR / "bt7274-ru-medium.onnx").exists() else "qwen"
 ENGINE = os.environ.get("BT7274_TTS_ENGINE", _default_engine).strip().lower()
 if ENGINE not in {"piper", "qwen"}:
     ENGINE = _default_engine
 MODEL_VERSION = (
-    f"piper-{PIPER_MODEL.stem}-v2-slow-clear"
+    f"piper-{PIPER_MODEL.stem}-v3-clear-calm"
     if ENGINE == "piper"
-    else "qwen3-tts-0.6b-base-ru-bt-v4-icl"
+    else "qwen3-tts-0.6b-base-ru-bt-v5-icl"
 )
 REFERENCE_VERSION = "bt-ru-ideal-v3-trim1"
 MAX_TEXT = 500
@@ -86,6 +86,10 @@ class VoiceService:
         self._piper_voice = None
         self._last_used = 0.0
         self._idle_unload_seconds = max(0, int(idle_unload_seconds))
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            LOG.exception("Не удалось создать каталог голосового кэша: %s", CACHE_DIR)
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._idle_worker,
@@ -240,9 +244,11 @@ class VoiceService:
         from piper import SynthesisConfig
 
         assert self._piper_voice is not None
-        # Slightly slower for calmer BT-like delivery; keep consistent.
-        length_scale = 1.30 if len(text) < 120 else 1.22
-        syn = SynthesisConfig(length_scale=length_scale, noise_scale=0.55, noise_w_scale=0.7)
+        started = time.perf_counter()
+        # Спокойный, размеренный темп БТ: короткие реплики чуть медленнее.
+        length_scale = 1.32 if len(text) < 120 else 1.24
+        # Меньше шума — меньше хрипа и «песка» на согласных.
+        syn = SynthesisConfig(length_scale=length_scale, noise_scale=0.50, noise_w_scale=0.65)
         chunks = split_text(text, limit=220)
         pieces: list[np.ndarray] = []
         sample_rate = 22050
@@ -253,16 +259,18 @@ class VoiceService:
                 continue
             sample_rate = int(raw_chunks[0].sample_rate)
             audio = np.concatenate([c.audio_float_array for c in raw_chunks]).astype(np.float32)
-            audio = _trim_edges(audio, sample_rate, tail_margin=0.12)
+            audio = _trim_edges(audio, sample_rate, tail_margin=0.14)
             pieces.append(audio)
             if index + 1 < len(chunks):
-                pieces.append(np.zeros(int(sample_rate * 0.12), dtype=np.float32))
+                # Пауза между предложениями длиннее, чем внутри фразы.
+                pause = 0.20 if re.search(r"[.!?…]\s*$", chunk) else 0.12
+                pieces.append(np.zeros(int(sample_rate * pause), dtype=np.float32))
         if not pieces:
             raise RuntimeError("Piper не вернул аудио")
         audio = np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
         audio = apply_variant(audio, sample_rate, variant)
         # Ensure there's a tiny tail so players don't clip the last phoneme.
-        tail_pad = np.zeros(int(sample_rate * 0.08), dtype=np.float32)
+        tail_pad = np.zeros(int(sample_rate * 0.10), dtype=np.float32)
         audio = np.concatenate([audio, tail_pad])
         buffer = io.BytesIO()
         sf.write(buffer, audio, sample_rate, format="WAV", subtype="PCM_16")
@@ -272,7 +280,7 @@ class VoiceService:
             "variant": variant,
             "text": text,
             "duration_s": round(duration, 3),
-            "rtf": round((time.perf_counter() - 0) / max(0.001, duration), 3),  # placeholder, overwritten
+            "rtf": round((time.perf_counter() - started) / max(0.001, duration), 3),
             "sample_rate": int(sample_rate),
             "vram_mb": 0,
         }
@@ -346,9 +354,37 @@ _TTS_REPLACEMENTS = [
     (re.compile(r"\bYouTube\b", re.IGNORECASE), "Ютуб"),
     (re.compile(r"\bSteam\b", re.IGNORECASE), "Стим"),
     (re.compile(r"\bDiscord\b", re.IGNORECASE), "Дискорд"),
+    (re.compile(r"\bTelegram\b", re.IGNORECASE), "Телеграм"),
+    (re.compile(r"\bSpotify\b", re.IGNORECASE), "Спотифай"),
+    (re.compile(r"\bSoundCloud\b", re.IGNORECASE), "Саундклауд"),
     (re.compile(r"\bOBS Studio\b", re.IGNORECASE), "О-Би-Эс"),
     (re.compile(r"\bOBS\b", re.IGNORECASE), "О-Би-Эс"),
     (re.compile(r"\bOllama\b", re.IGNORECASE), "Оллама"),
+    (re.compile(r"\bVisual Studio Code\b", re.IGNORECASE), "Вижуал Студио Код"),
+    (re.compile(r"\bVS Code\b", re.IGNORECASE), "Вижуал Студио Код"),
+    (re.compile(r"\bVSCode\b", re.IGNORECASE), "Вижуал Студио Код"),
+    (re.compile(r"\bGitHub\b", re.IGNORECASE), "Гитхаб"),
+    (re.compile(r"\bGoogle Chrome\b", re.IGNORECASE), "Гугл Хром"),
+    (re.compile(r"\bChrome\b", re.IGNORECASE), "Хром"),
+    (re.compile(r"\bFirefox\b", re.IGNORECASE), "Файрфокс"),
+    (re.compile(r"\bOpera GX\b", re.IGNORECASE), "Опера Джи Икс"),
+    (re.compile(r"\bOpera\b", re.IGNORECASE), "Опера"),
+    (re.compile(r"\bBrave\b", re.IGNORECASE), "Брейв"),
+    (re.compile(r"\bVivaldi\b", re.IGNORECASE), "Вивальди"),
+    (re.compile(r"\bWindows\b", re.IGNORECASE), "Виндовс"),
+    (re.compile(r"\bPython\b", re.IGNORECASE), "Пайтон"),
+    (re.compile(r"\bNVIDIA\b", re.IGNORECASE), "Эн-Видиа"),
+    (re.compile(r"\bAMD\b", re.IGNORECASE), "А-Эм-Ди"),
+    (re.compile(r"\bIntel\b", re.IGNORECASE), "Интел"),
+    (re.compile(r"\bRTX\b", re.IGNORECASE), "Эр-Ти-Экс"),
+    (re.compile(r"\bGTX\b", re.IGNORECASE), "Джи-Ти-Экс"),
+    (re.compile(r"\bDLSS\b", re.IGNORECASE), "Ди-Эл-Эс-Эс"),
+    (re.compile(r"\bFSR\b", re.IGNORECASE), "Эф-Эс-Эр"),
+    (re.compile(r"\bWi-?Fi\b", re.IGNORECASE), "вай-фай"),
+    (re.compile(r"\bBluetooth\b", re.IGNORECASE), "блютуз"),
+    (re.compile(r"\bSSD\b", re.IGNORECASE), "эс-эс-ди"),
+    (re.compile(r"\bHDD\b", re.IGNORECASE), "эйч-ди-ди"),
+    (re.compile(r"\bUSB\b", re.IGNORECASE), "ю-эс-би"),
     (re.compile(r"\blocalhost:11434\b", re.IGNORECASE), "локальный сервер"),
     (re.compile(r"\blocalhost\b", re.IGNORECASE), "локальный сервер"),
     (re.compile(r"\bCPU\b", re.IGNORECASE), "процессор"),
@@ -358,8 +394,19 @@ _TTS_REPLACEMENTS = [
     (re.compile(r"\bFPS\b", re.IGNORECASE), "кадров в секунду"),
     (re.compile(r"\bfps\b", re.IGNORECASE), "кадров в секунду"),
     (re.compile(r"\bAPI\b", re.IGNORECASE), "А-Пи-Ай"),
+    (re.compile(r"\bHTTPS\b", re.IGNORECASE), "Эйч-Ти-Ти-Пи-Эс"),
     (re.compile(r"\bHTTP\b", re.IGNORECASE), "Эйч-Ти-Ти-Пи"),
     (re.compile(r"\bTTS\b", re.IGNORECASE), "Ти-Ти-Эс"),
+    (re.compile(r"\bASR\b", re.IGNORECASE), "А-Эс-Эр"),
+    (re.compile(r"\bLLM\b", re.IGNORECASE), "Эл-Эл-Эм"),
+    (re.compile(r"\bGUI\b", re.IGNORECASE), "Ги-Ю-Ай"),
+    (re.compile(r"\bURL\b", re.IGNORECASE), "Ю-Эр-Эл"),
+    (re.compile(r"\bID\b", re.IGNORECASE), "Ай-Ди"),
+    (re.compile(r"\bIP\b", re.IGNORECASE), "Ай-Пи"),
+    (re.compile(r"\bAI\b", re.IGNORECASE), "эй-ай"),
+    (re.compile(r"\bML\b", re.IGNORECASE), "эм-эл"),
+    (re.compile(r"\bPC\b", re.IGNORECASE), "Пи-Си"),
+    (re.compile(r"\bOK\b", re.IGNORECASE), "окей"),
     (re.compile(r"\bЦП\b"), "процессор"),
     (re.compile(r"\bГП\b"), "видеокарта"),
     (re.compile(r"\bОЗУ\b"), "оперативная память"),
@@ -388,6 +435,36 @@ def _pct_word(n: int) -> str:
     if l in {2,3,4}: return "процента"
     return "процентов"
 
+def _plural_form(n: int, forms: tuple[str, str, str]) -> str:
+    a = abs(int(n)) % 100
+    last = a % 10
+    if 11 <= a <= 14:
+        return forms[2]
+    if last == 1:
+        return forms[0]
+    if last in {2, 3, 4}:
+        return forms[1]
+    return forms[2]
+
+def _num_token_words(token: str) -> str:
+    value = str(token).strip().replace(",", ".")
+    if "." in value:
+        whole, fraction = value.split(".", 1)
+        whole_words = _num_words(int(whole)) if whole.lstrip("+-").isdigit() else whole
+        fraction_words = " ".join(
+            _num_words(int(char)) if char.isdigit() else char for char in fraction
+        )
+        return f"{whole_words} точка {fraction_words}".strip()
+    return _num_words(int(value)) if value.lstrip("+-").isdigit() else value
+
+def _quantity_words(token: str, forms: tuple[str, str, str]) -> str:
+    value = str(token).strip().replace(",", ".")
+    try:
+        number = int(float(value))
+    except ValueError:
+        number = 0
+    return f"{_num_token_words(value)} {_plural_form(number, forms)}"
+
 def prepare_tts_text(text: str) -> str:
     value = " ".join(str(text or "").split()).strip()
     if not value:
@@ -395,40 +472,150 @@ def prepare_tts_text(text: str) -> str:
     value = re.sub(r"https?://\S+", " ", value)
     value = re.sub(r"[A-Za-z]:\\[^\s]+", " ", value)
     value = re.sub(r"`[^`]+`", " ", value)
-    value = re.sub(r"\b[\w./\\-]+\.(?:py|exe|log|txt|json|wav|mp3|webp|png|jpg)\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"\b[\w./\\-]+\.(?:py|exe|log|txt|json|wav|mp3|webp|png|jpg|jpeg|gif|mp4|webm|onnx|md|zip|bat|ps1|js|ts|css|html|toml|ini|cfg|csv|db)\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
     for pat, repl in _TTS_REPLACEMENTS:
         value = pat.sub(repl, value)
-    value = re.sub(r"\b(\d{1,3})\s*%", lambda m: f"{_num_words(int(m.group(1)))} {_pct_word(int(m.group(1)))}", value)
-    value = re.sub(r"(?<![\w/])(\d{1,3})(?![\w/])", lambda m: _num_words(int(m.group(1))) if 0 <= int(m.group(1)) <= 100 else m.group(1), value)
-    value = value.replace("&", " и ").replace("/", " ")
+    # IP-адрес — целиком, иначе Piper читает точки как паузы.
+    value = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", " ай-пи адрес ", value)
+    # Температура (включая минус) — до общей замены чисел.
+    value = re.sub(
+        r"([+-]?\d{1,3})\s*°\s*C\b",
+        lambda m: _quantity_words(m.group(1).lstrip("+"), ("градус", "градуса", "градусов"))
+        + " Цельсия",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"([+-]?\d{1,3})\s*°\s*F\b",
+        lambda m: _quantity_words(m.group(1).lstrip("+"), ("градус", "градуса", "градусов"))
+        + " Фаренгейта",
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Единицы измерения вместе с числом: 16 ГБ -> шестнадцать гигабайт.
+    units: tuple[tuple[str, tuple[str, str, str]], ...] = (
+        (r"(\d+(?:[.,]\d+)?)\s*(?:ГГц|GHz)\b", ("гигагерц", "гигагерца", "гигагерц")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:МГц|MHz)\b", ("мегагерц", "мегагерца", "мегагерц")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:Гц|Hz)\b", ("герц", "герца", "герц")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:ТБ|TB)\b", ("терабайт", "терабайта", "терабайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:ГБ|GB)\b", ("гигабайт", "гигабайта", "гигабайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:МБ|MB)\b", ("мегабайт", "мегабайта", "мегабайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:КБ|KB)\b", ("килобайт", "килобайта", "килобайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:мс|ms)\b", ("миллисекунда", "миллисекунды", "миллисекунд")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:Вт|W)\b", ("ватт", "ватта", "ватт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:кг|kg)\b", ("килограмм", "килограмма", "килограмм")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:км|km)\b", ("километр", "километра", "километров")),
+    )
+    for pattern, forms in units:
+        value = re.sub(
+            pattern,
+            lambda m, forms=forms: _quantity_words(m.group(1), forms),
+            value,
+            flags=re.IGNORECASE,
+        )
+    # Версии: v2.2.0 -> два точка два точка ноль.
+    value = re.sub(
+        r"\b[vV](\d+(?:\.\d+)+)\b",
+        lambda m: " точка ".join(_num_words(int(part)) for part in m.group(1).split(".")),
+        value,
+    )
+    value = re.sub(
+        r"\b(\d+(?:\.\d+){2,})\b",
+        lambda m: " точка ".join(_num_words(int(part)) for part in m.group(1).split(".")),
+        value,
+    )
+    # Клавиши F1..F12.
+    value = re.sub(
+        r"\bF(\d{1,2})\b",
+        lambda m: "Эф-" + _num_words(int(m.group(1))),
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Десятичные числа: 3.5 -> три точка пять.
+    value = re.sub(
+        r"(?<![\w.])(\d+)[.,](\d+)(?![\w.])",
+        lambda m: f"{_num_words(int(m.group(1)))} точка {_num_words(int(m.group(2)))}",
+        value,
+    )
+    # Минус перед числом.
+    value = re.sub(
+        r"(?<![\w-])-(\d{1,3})(?![\w])",
+        lambda m: "минус " + _num_words(int(m.group(1))),
+        value,
+    )
+    value = re.sub(
+        r"\b(\d{1,3})\s*%",
+        lambda m: f"{_num_words(int(m.group(1)))} {_pct_word(int(m.group(1)))}",
+        value,
+    )
+    value = re.sub(
+        r"(?<![\w/])(\d{1,3})(?![\w/])",
+        lambda m: _num_words(int(m.group(1))) if 0 <= int(m.group(1)) <= 999 else m.group(1),
+        value,
+    )
+    value = value.replace("%", " процентов ")
+    value = value.replace("&", " и ")
+    value = value.replace("+", " плюс ")
+    value = value.replace("=", " равно ")
+    value = value.replace("№", " номер ")
+    value = value.replace("°", " градусов ")
+    value = value.replace("₽", " рублей ")
+    value = value.replace("$", " долларов ")
+    value = value.replace("€", " евро ")
+    value = value.replace("/", " ")
     value = re.sub(r"[\[\]{}()<>\"'`*_#~|\\]", " ", value)
-    value = re.sub(r"\s+", " ", value).strip(" \t\r\n-—:;,.")
+    value = re.sub(r"([,.;:!?])\1+", r"\1", value)
+    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    value = re.sub(r"\s+", " ", value).strip(" \t\r\n-—:;,")
     return value
 
 def split_text(text: str, limit: int = 180) -> list[str]:
-    if len(text) <= limit:
-        return [text]
+    clean = " ".join(str(text or "").split()).strip()
+    if not clean:
+        return []
+    if len(clean) <= limit:
+        return [clean]
+
+    def ensure_end(value: str) -> str:
+        value = value.strip(" \t\r\n-—:;,")
+        if value and value[-1] not in ".!?…":
+            value += "."
+        return value
+
+    # Сохраняем ? и ! — по ним Piper строит интонацию.
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?…])\s+", clean) if part.strip()]
     parts: list[str] = []
     current = ""
-    for sentence in text.replace("!", ".").replace("?", ".").split("."):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        candidate = f"{current} {sentence}.".strip() if current else f"{sentence}."
+    for sentence in sentences:
+        candidate = f"{current} {sentence}".strip() if current else sentence
         if len(candidate) <= limit:
             current = candidate
-        else:
-            if current:
-                parts.append(current)
-            while len(sentence) > limit:
-                cut = sentence.rfind(" ", 0, limit)
-                cut = cut if cut > 40 else limit
-                parts.append(sentence[:cut].strip() + ".")
-                sentence = sentence[cut:].strip()
-            current = sentence + "." if sentence else ""
+            continue
+        if current:
+            parts.append(ensure_end(current))
+            current = ""
+        if len(sentence) <= limit:
+            current = sentence
+            continue
+        words = sentence.split()
+        buf = ""
+        for word in words:
+            cand = f"{buf} {word}".strip() if buf else word
+            if len(cand) <= limit:
+                buf = cand
+            else:
+                if buf:
+                    parts.append(ensure_end(buf))
+                buf = word
+        current = buf
     if current:
-        parts.append(current)
-    return parts or [text[:limit]]
+        parts.append(ensure_end(current))
+    return [ensure_end(part) for part in parts] or [ensure_end(clean[:limit])]
 
 
 def _trim_edges(samples: np.ndarray, sample_rate: int, tail_margin: float = 0.18) -> np.ndarray:
@@ -536,17 +723,26 @@ def apply_variant(audio: np.ndarray, sample_rate: int, variant: str) -> np.ndarr
         return np.clip(samples, -1.0, 1.0).astype(np.float32)
 
     if variant != "raw":
+        # Лёгкая «радио»-окраска без перегруза: тело голоса и разборчивость.
         sos = signal.butter(
             2,
-            [65.0, min(9500.0, sample_rate * 0.45)],
+            [55.0, min(10500.0, sample_rate * 0.46)],
             btype="bandpass",
             fs=sample_rate,
             output="sos",
         )
         samples = signal.sosfilt(sos, samples)
-        samples = _peaking_eq(samples, sample_rate, 150.0, 0.9, 1.2)
-        samples = _peaking_eq(samples, sample_rate, 3100.0, 1.1, 1.0)
-        samples = np.tanh(samples * 1.05) / math.tanh(1.05)
+        samples = _peaking_eq(samples, sample_rate, 130.0, 0.8, 1.0)
+        samples = _peaking_eq(samples, sample_rate, 2800.0, 1.0, 1.5)
+        # Мягко убираем резкость на «с» и «ш».
+        samples = _peaking_eq(samples, sample_rate, 6800.0, 1.2, -1.0)
+        # Прозрачный лимитер: трогаем только пики, не добавляем грязь.
+        limit = 0.82
+        magnitude = np.abs(samples)
+        over = magnitude > limit
+        if np.any(over):
+            shaped = limit + (1.0 - limit) * np.tanh((magnitude[over] - limit) / (1.0 - limit))
+            samples[over] = np.sign(samples[over]) * shaped
 
     if variant == "vanguard":
         samples = _flanger(samples, sample_rate)

@@ -114,7 +114,7 @@ LOCAL_TTS_URL = (
 LOCAL_TTS_VARIANT = os.environ.get("BT7274_LOCAL_TTS_VARIANT", "mild").strip().lower()
 if LOCAL_TTS_VARIANT not in {"raw", "mild", "vanguard"}:
     LOCAL_TTS_VARIANT = "mild"
-LOCAL_TTS_VERSION = "piper-bt7274-ru-medium-v2-slow-clear"
+LOCAL_TTS_VERSION = "piper-bt7274-ru-medium-v3-clear-calm"
 LOCAL_TTS_MODE = os.environ.get("BT7274_LOCAL_TTS", "auto").strip().lower()
 LOCAL_TTS_ENABLED = LOCAL_TTS_MODE not in {"0", "false", "off", "no", "disabled"}
 LOCAL_TTS_AUTOSTART = os.environ.get(
@@ -1185,9 +1185,13 @@ TTS_SPEECH_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bOBS\b", re.IGNORECASE), "О-Би-Эс"),
     (re.compile(r"\bOllama\b", re.IGNORECASE), "Оллама"),
     (re.compile(r"\bEdge TTS\b", re.IGNORECASE), "Эдж Ти-Ти-Эс"),
-    (re.compile(r"\bFirefox\b", re.IGNORECASE), "Файрфокс"),
-    (re.compile(r"\bChrome\b", re.IGNORECASE), "Хром"),
+    (re.compile(r"\bVisual Studio Code\b", re.IGNORECASE), "Вижуал Студио Код"),
+    (re.compile(r"\bVS Code\b", re.IGNORECASE), "Вижуал Студио Код"),
+    (re.compile(r"\bVSCode\b", re.IGNORECASE), "Вижуал Студио Код"),
+    (re.compile(r"\bGitHub\b", re.IGNORECASE), "Гитхаб"),
     (re.compile(r"\bGoogle Chrome\b", re.IGNORECASE), "Гугл Хром"),
+    (re.compile(r"\bChrome\b", re.IGNORECASE), "Хром"),
+    (re.compile(r"\bFirefox\b", re.IGNORECASE), "Файрфокс"),
     (re.compile(r"\bOpera GX\b", re.IGNORECASE), "Опера Джи Икс"),
     (re.compile(r"\bOpera\b", re.IGNORECASE), "Опера"),
     (re.compile(r"\bBrave\b", re.IGNORECASE), "Брейв"),
@@ -1197,6 +1201,19 @@ TTS_SPEECH_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bTelegram\b", re.IGNORECASE), "Телеграм"),
     (re.compile(r"\bWindows\b", re.IGNORECASE), "Виндовс"),
     (re.compile(r"\bVK Music\b", re.IGNORECASE), "Вэ-Ка Мьюзик"),
+    (re.compile(r"\bPython\b", re.IGNORECASE), "Пайтон"),
+    (re.compile(r"\bNVIDIA\b", re.IGNORECASE), "Эн-Видиа"),
+    (re.compile(r"\bAMD\b", re.IGNORECASE), "А-Эм-Ди"),
+    (re.compile(r"\bIntel\b", re.IGNORECASE), "Интел"),
+    (re.compile(r"\bRTX\b", re.IGNORECASE), "Эр-Ти-Экс"),
+    (re.compile(r"\bGTX\b", re.IGNORECASE), "Джи-Ти-Экс"),
+    (re.compile(r"\bDLSS\b", re.IGNORECASE), "Ди-Эл-Эс-Эс"),
+    (re.compile(r"\bFSR\b", re.IGNORECASE), "Эф-Эс-Эр"),
+    (re.compile(r"\bWi-?Fi\b", re.IGNORECASE), "вай-фай"),
+    (re.compile(r"\bBluetooth\b", re.IGNORECASE), "блютуз"),
+    (re.compile(r"\bSSD\b", re.IGNORECASE), "эс-эс-ди"),
+    (re.compile(r"\bHDD\b", re.IGNORECASE), "эйч-ди-ди"),
+    (re.compile(r"\bUSB\b", re.IGNORECASE), "ю-эс-би"),
     (re.compile(r"\bCPU\b", re.IGNORECASE), "процессор"),
     (re.compile(r"\bGPU\b", re.IGNORECASE), "видеокарта"),
     (re.compile(r"\bRAM\b", re.IGNORECASE), "оперативная память"),
@@ -1213,6 +1230,10 @@ TTS_SPEECH_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bURL\b", re.IGNORECASE), "Ю-Эр-Эл"),
     (re.compile(r"\bID\b", re.IGNORECASE), "Ай-Ди"),
     (re.compile(r"\bIP\b", re.IGNORECASE), "Ай-Пи"),
+    (re.compile(r"\bAI\b", re.IGNORECASE), "эй-ай"),
+    (re.compile(r"\bML\b", re.IGNORECASE), "эм-эл"),
+    (re.compile(r"\bPC\b", re.IGNORECASE), "Пи-Си"),
+    (re.compile(r"\bOK\b", re.IGNORECASE), "окей"),
     (re.compile(r"\blocalhost:11434\b", re.IGNORECASE), "локальный сервер"),
     (re.compile(r"\blocalhost\b", re.IGNORECASE), "локальный сервер"),
     (re.compile(r"\bЦП\b"), "процессор"),
@@ -1262,6 +1283,42 @@ def _tts_percent_word(value: int) -> str:
     return "процентов"
 
 
+def _tts_plural_form(value: int, forms: tuple[str, str, str]) -> str:
+    abs_v = abs(int(value)) % 100
+    last = abs_v % 10
+    if 11 <= abs_v <= 14:
+        return forms[2]
+    if last == 1:
+        return forms[0]
+    if last in {2, 3, 4}:
+        return forms[1]
+    return forms[2]
+
+
+def _tts_num_token_words(token: str) -> str:
+    value = str(token).strip().replace(",", ".")
+    if "." in value:
+        whole, fraction = value.split(".", 1)
+        whole_words = (
+            _tts_number_to_words(int(whole)) if whole.lstrip("+-").isdigit() else whole
+        )
+        fraction_words = " ".join(
+            _tts_number_to_words(int(char)) if char.isdigit() else char
+            for char in fraction
+        )
+        return f"{whole_words} точка {fraction_words}".strip()
+    return _tts_number_to_words(int(value)) if value.lstrip("+-").isdigit() else value
+
+
+def _tts_quantity_words(token: str, forms: tuple[str, str, str]) -> str:
+    value = str(token).strip().replace(",", ".")
+    try:
+        number = int(float(value))
+    except ValueError:
+        number = 0
+    return f"{_tts_num_token_words(value)} {_tts_plural_form(number, forms)}"
+
+
 def prepare_text_for_tts(text: str) -> str:
     """Нормализует текст для чёткого произношения Piper/espeak."""
     value = clean_display_text(text)
@@ -1271,28 +1328,119 @@ def prepare_text_for_tts(text: str) -> str:
     value = re.sub(r"https?://\S+", " ", value)
     value = re.sub(r"[A-Za-z]:\\[^\s]+", " ", value)
     value = re.sub(r"`[^`]+`", " ", value)
-    value = re.sub(r"\b[\w./\\-]+\.(?:py|exe|log|txt|json|wav|mp3|webp|png|jpg)\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"\b[\w./\\-]+\.(?:py|exe|log|txt|json|wav|mp3|webp|png|jpg|jpeg|gif|mp4|webm|onnx|md|zip|bat|ps1|js|ts|css|html|toml|ini|cfg|csv|db)\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
     for pattern, replacement in TTS_SPEECH_REPLACEMENTS:
         value = pattern.sub(replacement, value)
+    # IP-адрес целиком, иначе точки звучат как паузы.
+    value = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", " ай-пи адрес ", value)
+    # Температура (включая минус).
+    value = re.sub(
+        r"([+-]?\d{1,3})\s*°\s*C\b",
+        lambda m: _tts_quantity_words(
+            m.group(1).lstrip("+"), ("градус", "градуса", "градусов")
+        )
+        + " Цельсия",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"([+-]?\d{1,3})\s*°\s*F\b",
+        lambda m: _tts_quantity_words(
+            m.group(1).lstrip("+"), ("градус", "градуса", "градусов")
+        )
+        + " Фаренгейта",
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Единицы измерения вместе с числом: 16 ГБ -> шестнадцать гигабайт.
+    units: tuple[tuple[str, tuple[str, str, str]], ...] = (
+        (r"(\d+(?:[.,]\d+)?)\s*(?:ГГц|GHz)\b", ("гигагерц", "гигагерца", "гигагерц")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:МГц|MHz)\b", ("мегагерц", "мегагерца", "мегагерц")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:Гц|Hz)\b", ("герц", "герца", "герц")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:ТБ|TB)\b", ("терабайт", "терабайта", "терабайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:ГБ|GB)\b", ("гигабайт", "гигабайта", "гигабайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:МБ|MB)\b", ("мегабайт", "мегабайта", "мегабайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:КБ|KB)\b", ("килобайт", "килобайта", "килобайт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:мс|ms)\b", ("миллисекунда", "миллисекунды", "миллисекунд")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:Вт|W)\b", ("ватт", "ватта", "ватт")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:кг|kg)\b", ("килограмм", "килограмма", "килограмм")),
+        (r"(\d+(?:[.,]\d+)?)\s*(?:км|km)\b", ("километр", "километра", "километров")),
+    )
+    for pattern, forms in units:
+        value = re.sub(
+            pattern,
+            lambda m, forms=forms: _tts_quantity_words(m.group(1), forms),
+            value,
+            flags=re.IGNORECASE,
+        )
+    # Версии: v2.2.0 -> два точка два точка ноль.
+    value = re.sub(
+        r"\b[vV](\d+(?:\.\d+)+)\b",
+        lambda m: " точка ".join(
+            _tts_number_to_words(int(part)) for part in m.group(1).split(".")
+        ),
+        value,
+    )
+    value = re.sub(
+        r"\b(\d+(?:\.\d+){2,})\b",
+        lambda m: " точка ".join(
+            _tts_number_to_words(int(part)) for part in m.group(1).split(".")
+        ),
+        value,
+    )
+    # Клавиши F1..F12.
+    value = re.sub(
+        r"\bF(\d{1,2})\b",
+        lambda m: "Эф-" + _tts_number_to_words(int(m.group(1))),
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Десятичные числа: 3.5 -> три точка пять.
+    value = re.sub(
+        r"(?<![\w.])(\d+)[.,](\d+)(?![\w.])",
+        lambda m: f"{_tts_number_to_words(int(m.group(1)))} точка "
+        f"{_tts_number_to_words(int(m.group(2)))}",
+        value,
+    )
+    # Минус перед числом.
+    value = re.sub(
+        r"(?<![\w-])-(\d{1,3})(?![\w])",
+        lambda m: "минус " + _tts_number_to_words(int(m.group(1))),
+        value,
+    )
     # 34% -> тридцать четыре процента
     def _pct(m: re.Match[str]) -> str:
         n = int(m.group(1))
         return f"{_tts_number_to_words(n)} {_tts_percent_word(n)}"
+
     value = re.sub(r"\b(\d{1,3})\s*%", _pct, value)
-    # °C / °F
-    value = re.sub(r"\b(\d{1,3})\s*°\s*C\b", lambda m: f"{_tts_number_to_words(int(m.group(1)))} градусов Цельсия", value, flags=re.IGNORECASE)
-    value = re.sub(r"\b(\d{1,3})\s*°\s*F\b", lambda m: f"{_tts_number_to_words(int(m.group(1)))} градусов Фаренгейта", value, flags=re.IGNORECASE)
     # Standalone small integers in command-like responses are clearer as words.
     def _num(m: re.Match[str]) -> str:
         n = int(m.group(1))
-        if 0 <= n <= 100:
+        if 0 <= n <= 999:
             return _tts_number_to_words(n)
         return m.group(1)
+
     value = re.sub(r"(?<![\w/])(\d{1,3})(?![\w/])", _num, value)
+    value = value.replace("%", " процентов ")
     value = value.replace("&", " и ")
+    value = value.replace("+", " плюс ")
+    value = value.replace("=", " равно ")
+    value = value.replace("№", " номер ")
+    value = value.replace("°", " градусов ")
+    value = value.replace("₽", " рублей ")
+    value = value.replace("$", " долларов ")
+    value = value.replace("€", " евро ")
     value = value.replace("/", " ")
     value = re.sub(r'[\[\]{}()<>\'"`*_#~|\\]', " ", value)
-    value = re.sub(r"\s+", " ", value).strip(" \t\r\n-—:;,.")
+    value = re.sub(r"([,.;:!?])\1+", r"\1", value)
+    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    value = re.sub(r"\s+", " ", value).strip(" \t\r\n-—:;,")
     return value
 
 
@@ -1886,8 +2034,6 @@ class AudioRecorder:
         self._chunks: queue.Queue[np.ndarray] | None = None
         self._sample_rate = AUDIO_SAMPLE_RATE
         self._active = False
-        self.level_callback: Callable[[float], None] | None = None
-        self._level_emit_at = 0.0
 
     @property
     def active(self) -> bool:
@@ -1902,16 +2048,6 @@ class AudioRecorder:
                 chunk_queue.put_nowait(indata.copy())
             except Exception:
                 LOG.exception("Не удалось сохранить аудиоблок")
-            callback = self.level_callback
-            if callback is not None:
-                now = time.monotonic()
-                if now - self._level_emit_at >= 1.0 / 30.0:
-                    self._level_emit_at = now
-                    try:
-                        rms = float(np.sqrt(np.mean(np.square(indata))))
-                        callback(min(1.0, max(0.0, (rms / 0.085) ** 0.7)))
-                    except Exception:
-                        pass
 
         return sd.InputStream(
             samplerate=rate,
@@ -3369,7 +3505,7 @@ class HelmetWidget(QWidget):
         self._frame = 0
         self._target_opacity = 1.0
         # Equalizer / CRT appearance
-        self._eq_mode = "idle"  # idle | speaking | listening
+        self._eq_mode = "idle"  # idle | speaking (только голос БТ)
         self._eq_level = 0.0
         self._eq_level_target = 0.0
         self._eq_bars = [0.08] * 13
@@ -3472,9 +3608,9 @@ class HelmetWidget(QWidget):
             self._timer.start()
 
     def set_audio_level(self, level: float, mode: str = "speaking") -> None:
-        """Уровень 0..1 для эквалайзера (TTS/mic)."""
+        """Уровень 0..1 для эквалайзера. Микрофон сюда не попадает."""
         now = time.monotonic()
-        self._eq_mode = mode if mode in {"idle", "speaking", "listening"} else "speaking"
+        self._eq_mode = "speaking" if mode == "speaking" else "idle"
         self._eq_level_target = max(0.0, min(1.0, float(level)))
         if self._eq_mode == "idle":
             self._eq_until = 0.0
@@ -3500,7 +3636,7 @@ class HelmetWidget(QWidget):
 
         if now >= self._wave_until:
             self._wave_target = 0.0
-        if self._eq_mode in {"speaking", "listening"} and now >= self._eq_until:
+        if self._eq_mode == "speaking" and now >= self._eq_until:
             self._eq_mode = "idle"
             self._eq_level_target = 0.0
         self._wave_strength += (self._wave_target - self._wave_strength) * min(
@@ -3513,10 +3649,7 @@ class HelmetWidget(QWidget):
         for i in range(13):
             if self._eq_mode == "idle":
                 target = 0.045 + 0.018 * math.sin(self._phase * 1.9 + i * 0.5)
-            elif self._eq_mode == "listening":
-                wobble = 0.82 + 0.18 * math.sin(self._phase * 3.2 + i * 0.55)
-                target = (0.06 + 0.94 * self._eq_level) * (0.55 + 0.45 * bell[i]) * wobble
-            else:  # speaking
+            else:  # speaking — только TTS
                 wobble = 0.80 + 0.20 * math.sin(self._phase * 11.0 + i * 0.85)
                 wobble *= 0.92 + 0.08 * math.sin(self._phase * 23.0 - i * 1.4)
                 target = (0.05 + 0.95 * self._eq_level) * bell[i] * wobble
@@ -4145,7 +4278,8 @@ class GlitchOverlay(QWidget):
         self._subtitle.set_text(text)
         self._set_state("СЛУШАЮ", QColor(0, 232, 255))
         self._helmet.set_glitch(True)
-        self._helmet.set_audio_level(0.0, "listening")
+        # Бары реагируют только на голос БТ. В режиме прослушивания — покой.
+        self._helmet.set_idle_mode()
         self._present()
 
     def show_response(self, text: str) -> None:
@@ -4704,9 +4838,6 @@ class BT7274Controller(QObject):
         self._signals.voice_level.connect(self._on_voice_level)
         self._voice.level_callback = (
             lambda level, mode: self._signals.voice_level.emit(level, mode)
-        )
-        self._recorder.level_callback = (
-            lambda level: self._signals.voice_level.emit(level, "listening")
         )
         self._setup_tray()
         self._install_hotkeys()
@@ -5462,7 +5593,9 @@ class BT7274Controller(QObject):
     def _on_voice_level(self, level: float, mode: str) -> None:
         if self._closing:
             return
-        if mode == "listening" and self._state != AgentState.LISTENING:
+        if mode != "speaking":
+            # Микрофон и служебные сигналы не управляют барами.
+            self._overlay.set_eq_level(0.0, "idle")
             return
         self._overlay.set_eq_level(level, mode)
 
